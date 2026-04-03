@@ -6,6 +6,7 @@ import io.confluent.csfle.crosscloud.config.KekReference;
 import io.confluent.csfle.crosscloud.config.KmsType;
 import io.confluent.csfle.crosscloud.crypto.FieldEncryptor;
 import io.confluent.csfle.crosscloud.dek.DekFetcher;
+import io.confluent.csfle.crosscloud.dek.DekResult;
 import io.confluent.csfle.crosscloud.linking.ConfluentSchemaRegistryClient;
 import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.ProducerConfig;
@@ -85,10 +86,11 @@ public class CrossCloudProducer {
                 cfg.getProperty("src.sr.api.key"),
                 cfg.getProperty("src.sr.api.secret"));
 
-        byte[] dek = fetcher.fetchPlaintextDek("social_security", "src");
+        DekResult dek = fetcher.fetchDek("social_security", "src");
 
         // ── Step 3: Produce encrypted records ─────────────────────────────
         try {
+            log.info("DEK version {} will be embedded in each encrypted field.", dek.version());
             log.info("");
             log.info("Step 3 — Producing {} CSFLE-encrypted records to '{}'",
                     RECORDS.length, cfg.getProperty("topic"));
@@ -97,7 +99,7 @@ public class CrossCloudProducer {
             try (KafkaProducer<String, String> producer = buildProducer(cfg)) {
                 for (String[] rec : RECORDS) {
                     String id = rec[0], name = rec[1], ssn = rec[2];
-                    String encSsn = FieldEncryptor.encrypt(ssn, dek);
+                    String encSsn = FieldEncryptor.encrypt(ssn, dek.plaintext(), dek.version());
                     String value  = json(id, name, encSsn);
 
                     producer.send(new ProducerRecord<>(cfg.getProperty("topic"), id, value),
@@ -115,7 +117,7 @@ public class CrossCloudProducer {
             log.info("All {} records produced. Records will appear in GCP cluster via cluster linking.", RECORDS.length);
 
         } finally {
-            Arrays.fill(dek, (byte) 0);
+            Arrays.fill(dek.plaintext(), (byte) 0);
             log.info("Plaintext DEK zeroed from memory.");
         }
     }

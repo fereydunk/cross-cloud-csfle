@@ -189,7 +189,8 @@ cross-cloud-csfle/
 │   ├── deployment.properties.template   # Config template — copy and fill in
 │   └── deployment.properties            # Your local config — gitignored
 ├── docs/
-│   └── design.md                        # Full design decisions and trade-off record
+│   ├── design.md                        # Full design decisions and trade-off record
+│   └── failover-design.md               # DR failover, failback, and DEK sync design
 ├── Dockerfile                           # Multi-stage Maven + JRE build
 ├── docker-compose.yml                   # provisioner / producer / consumer / test services
 ├── src/
@@ -200,6 +201,7 @@ cross-cloud-csfle/
 │   │   ├── app/
 │   │   │   ├── CrossCloudProducer.java              # AWS: provision + encrypt + produce
 │   │   │   ├── CrossCloudConsumer.java              # GCP: fetch dst DEK + decrypt + consume
+│   │   │   ├── DekSyncApp.java                      # Pre-failback DEK sync (re-wrap + push to recovering SR)
 │   │   │   ├── SourceConsumer.java                  # AWS cluster + AWS KMS (positive test)
 │   │   │   ├── SourceConsumerGcpAttempt.java        # AWS cluster + GCP KMS (negative test)
 │   │   │   └── DestinationConsumerAwsAttempt.java   # GCP cluster + AWS KMS (negative test)
@@ -209,10 +211,13 @@ cross-cloud-csfle/
 │   │   │   ├── KmsType.java             # Enum: AWS, GCP, AZURE, HASHICORP_VAULT, CIPHERTRUST
 │   │   │   └── KmsTypeInferrer.java     # URI-based type inference for CSP KEKs
 │   │   ├── crypto/
-│   │   │   └── FieldEncryptor.java      # AES-256-GCM field encrypt/decrypt (iv:ct wire format)
+│   │   │   └── FieldEncryptor.java      # AES-256-GCM field encrypt/decrypt (dekVersion:iv:ct wire format)
 │   │   ├── dek/
-│   │   │   ├── DekFetcher.java          # Fetch wrapped DEK from SR subject; unwrap via KMS
-│   │   │   ├── DekProvisioner.java      # Core: generate → wrap×2 → persist → zero
+│   │   │   ├── DekFetcher.java          # Fetch wrapped DEK from SR subject; unwrap via KMS (version-aware)
+│   │   │   ├── DekProvisioner.java      # Core: generate → wrap×2 → persist → zero; single-KMS DR path
+│   │   │   ├── DekSyncer.java           # Failback sync: re-wrap missing DEK versions, push to recovering SR
+│   │   │   ├── DekResult.java           # DEK plaintext + SR version number pair
+│   │   │   ├── SyncReport.java          # DekSyncer outcome: counts, errors, completion gate
 │   │   │   ├── DekProvisioningResult.java
 │   │   │   ├── DekProvisioningException.java
 │   │   │   └── WrappedDek.java
@@ -268,6 +273,41 @@ mvn test
 ```
 
 Unit tests cover `EncryptionRule` validation, `KmsTypeInferrer` URI patterns, and `DekProvisioner` error handling using Mockito mocks. No real KMS or Schema Registry calls are made in tests.
+
+---
+
+## Disaster Recovery
+
+For full design rationale see [`docs/failover-design.md`](docs/failover-design.md). Summary:
+
+### Failover (link breaks, one KMS unavailable)
+
+No intervention needed. The surviving side already has its own wrapped DEK. GCP consumers keep decrypting with GCP KMS; AWS consumers keep decrypting with AWS KMS.
+
+If DEK rotation is required while one KMS is unreachable, use `DekProvisioner.provisionSingleKms()` to wrap the new DEK with the available KMS only. The second wrap is deferred to `DekSyncer` at link re-establishment. The DEK version is embedded in every encrypted field value (`dekVersion:iv:ct` wire format) so consumers resolve the exact DEK per record regardless of how many rotations have occurred.
+
+### Failback (recovering side comes back up)
+
+Run the DEK sync **before** promoting any mirror topics:
+
+```bash
+# Default: GCP survived (dst), AWS is recovering (src)
+java -jar $JAR sync $PROPS
+
+# Override if AWS survived instead:
+# Add sync.surviving.role=src to deployment.properties, then:
+java -jar $JAR sync $PROPS
+```
+
+`DekSyncer` will:
+1. List all DEK versions in the surviving SR
+2. For each version absent in the recovering SR: fetch → unwrap with surviving KMS → re-wrap with recovering KMS → push to recovering SR
+3. Briefly switch the recovering SR to READWRITE for the write, then restore its original mode
+4. Exit non-zero if any version fails — **do not promote topics until sync reports success**
+
+The operation is idempotent. Re-running after a partial failure is safe.
+
+See [`docs/failover-design.md`](docs/failover-design.md) for the full 22-step failback runbook with Confluent CLI commands.
 
 ---
 

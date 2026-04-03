@@ -2,6 +2,7 @@ package io.confluent.csfle.crosscloud.app;
 
 import io.confluent.csfle.crosscloud.crypto.FieldEncryptor;
 import io.confluent.csfle.crosscloud.dek.DekFetcher;
+import io.confluent.csfle.crosscloud.dek.DekResult;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
@@ -14,7 +15,9 @@ import java.io.FileInputStream;
 import java.io.IOException;
 import java.time.Duration;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Properties;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -50,16 +53,16 @@ public class CrossCloudConsumer {
         log.info("Cluster : {}", cfg.getProperty("dst.bootstrap.servers"));
         log.info("Topic   : {}", cfg.getProperty("topic"));
 
-        // ── Step 1: Unwrap dst DEK using GCP Cloud KMS ────────────────────
-        log.info("");
-        log.info("Step 1 — Fetching dst-wrapped DEK from GCP SR and unwrapping via GCP Cloud KMS");
-
         DekFetcher fetcher = new DekFetcher(
                 cfg.getProperty("dst.sr.url"),
                 cfg.getProperty("dst.sr.api.key"),
                 cfg.getProperty("dst.sr.api.secret"));
 
-        byte[] dek = fetcher.fetchPlaintextDek("social_security", "dst");
+        // DEK cache: version → plaintext DEK bytes.
+        // DEKs are fetched lazily from GCP SR and unwrapped via GCP Cloud KMS on first access.
+        // Multiple versions may coexist on the topic after DEK rotation; each is cached separately.
+        // All cached plaintext DEKs are zeroed on exit.
+        Map<Integer, byte[]> dekCache = new HashMap<>();
 
         // ── Step 2 & 3: Consume and decrypt ────────────────────────────────
         try {
@@ -80,9 +83,9 @@ public class CrossCloudConsumer {
                     ConsumerRecords<String, String> batch = consumer.poll(Duration.ofSeconds(2));
 
                     for (ConsumerRecord<String, String> record : batch) {
-                        String raw  = record.value();
-                        String id   = extract(ID_PATTERN, raw);
-                        String name = extract(NAME_PATTERN, raw);
+                        String raw    = record.value();
+                        String id     = extract(ID_PATTERN, raw);
+                        String name   = extract(NAME_PATTERN, raw);
                         String encSsn = extract(SSN_PATTERN, raw);
 
                         if (encSsn == null || !encSsn.contains(":")) {
@@ -91,6 +94,11 @@ public class CrossCloudConsumer {
                         }
 
                         try {
+                            int version = FieldEncryptor.parseDekVersion(encSsn);
+                            byte[] dek  = dekCache.computeIfAbsent(version, v -> {
+                                DekResult r = fetcher.fetchDek("social_security", "dst", v);
+                                return r.plaintext();
+                            });
                             String plainSsn = FieldEncryptor.decrypt(encSsn, dek);
                             log.info(String.format("  %-9s | %-18s | %s", id, name, plainSsn));
                             decrypted++;
@@ -110,8 +118,8 @@ public class CrossCloudConsumer {
             }
 
         } finally {
-            Arrays.fill(dek, (byte) 0);
-            log.info("Plaintext DEK zeroed from memory.");
+            dekCache.values().forEach(dek -> Arrays.fill(dek, (byte) 0));
+            log.info("Plaintext DEK(s) zeroed from memory.");
         }
     }
 

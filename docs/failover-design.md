@@ -391,26 +391,21 @@ complex and fragile.
 
 ---
 
-## What Needs to Be Built
+## Build Status
 
-| Component | Type | Description |
-|---|---|---|
-| `FieldEncryptor` | Modify | `dekVersion:iv:ct` wire format — encrypt embeds version, decrypt parses it |
-| `DekFetcher` | Modify | Accept optional version; fetch by exact version or `latest` |
-| `DekProvisioner` | Modify | Accept optional dst KMS client; skip dst wrap when absent |
-| `DekSyncer` | New | Compares DEK subjects across two SRs; re-wraps and pushes missing copies |
-| `FailbackRunner` | New | Automates the full failback runbook: Confluent API calls + DEK sync in correct order |
-| `Main` | Modify | Add `sync` and `failback` modes to dispatcher |
+| Component | Type | Status | Notes |
+|---|---|---|---|
+| `FieldEncryptor` | Modify | ✅ Done | `dekVersion:iv:ct` wire format; backward-compat with old `iv:ct` |
+| `DekFetcher` | Modify | ✅ Done | `fetchDek(field, role, version)` + `listVersions()` + `listDekFields()` |
+| `DekProvisioner` | Modify | ✅ Done | `provisionSingleKms(rule, useSrc)` — single-KMS DR path |
+| `DekSyncer` | New | ✅ Done | Compares SRs, re-wraps missing versions, SR mode management, idempotent |
+| `DekSyncApp` | New | ✅ Done | CLI entrypoint for `sync` mode; auto-detects surviving/recovering role |
+| `SyncReport` | New | ✅ Done | Completion gate — non-zero exit and error list on any failure |
+| `Main` | Modify | ✅ Done | `sync` mode wired to `DekSyncApp` |
+| `FailbackRunner` | New | ⬜ Not started | Full Confluent REST API orchestration (link + exporter + DEK sync sequence) |
 
-### Build order
-
-1. `FieldEncryptor` + `DekFetcher` — wire format and version resolution. Everything
-   downstream depends on this being correct. Existing tests must still pass.
-2. `DekProvisioner` — single-KMS path. Straightforward extension of existing logic.
-3. `DekSyncer` — core new primitive. Depends on both KMS clients and both SR clients
-   being injectable, which the existing interfaces already support.
-4. `FailbackRunner` — orchestrates Confluent REST API calls and DekSyncer in sequence.
-5. `Main` dispatcher — add `sync` and `failback` modes, update usage.
+`FailbackRunner` would automate the 22-step runbook below. Until it exists, operators
+follow the runbook manually, running `java -jar ... sync $PROPS` for steps 8–11.
 
 ---
 

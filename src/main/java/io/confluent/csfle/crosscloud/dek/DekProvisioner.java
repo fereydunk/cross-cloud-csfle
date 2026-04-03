@@ -41,6 +41,45 @@ public class DekProvisioner {
         this.dstRegistry = dstRegistry;
     }
 
+    /**
+     * DR mode: provisions a DEK using only the surviving KMS.
+     *
+     * Used when one KMS is unreachable (e.g. AWS is down, GCP is surviving).
+     * The DEK is wrapped with only the available KMS and stored under the given role.
+     * The second wrap is deferred — {@link DekSyncer} will add it when the link
+     * re-establishes and the other KMS becomes reachable again.
+     *
+     * @param rule    the encryption rule (only the relevant KEK is used)
+     * @param useSrc  true → wrap with src KEK and store as "src" role;
+     *                false → wrap with dst KEK and store as "dst" role
+     * @return result containing only the single wrapped copy (the other is null)
+     */
+    public DekProvisioningResult provisionSingleKms(EncryptionRule rule, boolean useSrc) {
+        String role = useSrc ? "src" : "dst";
+        log.info("DR provisioning DEK for field '{}' — single-KMS mode, role={}",
+                rule.getField(), role);
+
+        byte[] plaintextDek = generateDek();
+        try {
+            WrappedDek wrapped;
+            if (useSrc) {
+                wrapped = wrapWithSrc(rule, plaintextDek);
+                persistToSrc(rule, wrapped);
+                log.info("DR DEK for field '{}' wrapped with src KMS and stored as '{}' role — " +
+                         "dst wrap deferred to DekSyncer", rule.getField(), role);
+                return new DekProvisioningResult(rule.getField(), wrapped, null);
+            } else {
+                wrapped = wrapWithDst(rule, plaintextDek);
+                sendToDst(rule, wrapped);
+                log.info("DR DEK for field '{}' wrapped with dst KMS and stored as '{}' role — " +
+                         "src wrap deferred to DekSyncer", rule.getField(), role);
+                return new DekProvisioningResult(rule.getField(), null, wrapped);
+            }
+        } finally {
+            java.util.Arrays.fill(plaintextDek, (byte) 0);
+        }
+    }
+
     public DekProvisioningResult provision(EncryptionRule rule) {
         log.info("Provisioning DEK for field '{}' — src: {}, dst: {}",
                 rule.getField(), rule.getSrcKek().getId(), rule.getDstKek().getId());

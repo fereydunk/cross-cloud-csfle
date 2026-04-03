@@ -2,6 +2,7 @@ package io.confluent.csfle.crosscloud.app;
 
 import io.confluent.csfle.crosscloud.crypto.FieldEncryptor;
 import io.confluent.csfle.crosscloud.dek.DekFetcher;
+import io.confluent.csfle.crosscloud.dek.DekResult;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
@@ -14,7 +15,9 @@ import java.io.FileInputStream;
 import java.io.IOException;
 import java.time.Duration;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Properties;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;

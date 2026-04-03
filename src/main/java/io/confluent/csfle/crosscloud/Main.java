@@ -2,6 +2,7 @@ package io.confluent.csfle.crosscloud;
 
 import io.confluent.csfle.crosscloud.app.CrossCloudConsumer;
 import io.confluent.csfle.crosscloud.app.CrossCloudProducer;
+import io.confluent.csfle.crosscloud.app.DekSyncApp;
 import io.confluent.csfle.crosscloud.app.DestinationConsumerAwsAttempt;
 import io.confluent.csfle.crosscloud.app.SourceConsumer;
 import io.confluent.csfle.crosscloud.app.SourceConsumerGcpAttempt;
@@ -15,6 +16,7 @@ import java.util.Arrays;
  *   java -jar cross-cloud-csfle.jar provision                        deployment/deployment.properties
  *   java -jar cross-cloud-csfle.jar producer                         deployment/deployment.properties
  *   java -jar cross-cloud-csfle.jar consumer                         deployment/deployment.properties
+ *   java -jar cross-cloud-csfle.jar sync                             deployment/deployment.properties
  *   java -jar cross-cloud-csfle.jar source-consumer                  deployment/deployment.properties
  *   java -jar cross-cloud-csfle.jar source-consumer-gcp-attempt      deployment/deployment.properties
  *   java -jar cross-cloud-csfle.jar destination-consumer-aws-attempt deployment/deployment.properties
@@ -37,6 +39,7 @@ public class Main {
             case "provision"                         -> CrossCloudCsfleRunner.main(rest);
             case "producer"                          -> CrossCloudProducer.main(rest);
             case "consumer"                          -> CrossCloudConsumer.main(rest);
+            case "sync"                              -> DekSyncApp.main(rest);
             case "source-consumer"                   -> SourceConsumer.main(rest);
             case "source-consumer-gcp-attempt"       -> SourceConsumerGcpAttempt.main(rest);
             case "destination-consumer-aws-attempt"  -> DestinationConsumerAwsAttempt.main(rest);

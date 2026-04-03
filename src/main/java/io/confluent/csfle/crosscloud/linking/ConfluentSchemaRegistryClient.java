@@ -9,6 +9,7 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.util.Base64;
+import java.util.List;
 
 /**
  * Confluent Schema Registry client for DEK persistence.
@@ -130,6 +131,153 @@ public class ConfluentSchemaRegistryClient implements SrcSchemaRegistryClient, D
                 "DEK schema subject for field " + field + " (" + role + ")", true);
         log.info("DEK for field '{}' ({}) stored as schema subject '{}' in SR @ {}",
                 field, role, subject, baseUrl);
+    }
+
+    // ── Public methods used by DekSyncer ─────────────────────────────────────
+
+    /**
+     * Returns all subject names registered in this Schema Registry.
+     */
+    public List<String> listSubjects() {
+        HttpRequest req = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/subjects"))
+                .header("Authorization", authHeader)
+                .GET()
+                .build();
+        try {
+            HttpResponse<String> resp = httpClient.send(req, HttpResponse.BodyHandlers.ofString());
+            if (resp.statusCode() != 200) {
+                throw new RuntimeException("listSubjects failed [" + resp.statusCode() + "]: " + resp.body());
+            }
+            return parseJsonStringArray(resp.body());
+        } catch (IOException | InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("listSubjects request failed", e);
+        }
+    }
+
+    /**
+     * Returns all version numbers registered for the given subject.
+     */
+    public List<Integer> listVersions(String subject) {
+        HttpRequest req = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/subjects/" + subject + "/versions"))
+                .header("Authorization", authHeader)
+                .GET()
+                .build();
+        try {
+            HttpResponse<String> resp = httpClient.send(req, HttpResponse.BodyHandlers.ofString());
+            if (resp.statusCode() == 404) return List.of();
+            if (resp.statusCode() != 200) {
+                throw new RuntimeException("listVersions failed [" + resp.statusCode() + "]: " + resp.body());
+            }
+            return parseJsonIntArray(resp.body());
+        } catch (IOException | InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("listVersions request failed", e);
+        }
+    }
+
+    /**
+     * Returns true if the given subject has a schema at the specified version.
+     */
+    public boolean hasSubjectVersion(String subject, int version) {
+        HttpRequest req = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/subjects/" + subject + "/versions/" + version))
+                .header("Authorization", authHeader)
+                .GET()
+                .build();
+        try {
+            HttpResponse<String> resp = httpClient.send(req, HttpResponse.BodyHandlers.ofString());
+            return resp.statusCode() == 200;
+        } catch (IOException | InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
+        }
+    }
+
+    /**
+     * Stores a DEK with an explicit role, used by DekSyncer when re-wrapping DEKs
+     * from the surviving side and pushing to the recovering SR.
+     */
+    public void storeDekForRole(String field, String kekId, byte[] encryptedDek, String role) {
+        store(field, kekId, encryptedDek, role);
+    }
+
+    /**
+     * Sets the global Schema Registry mode (e.g. "READWRITE" or "IMPORT").
+     * Used by DekSyncer to temporarily switch the recovering SR to READWRITE
+     * for the duration of the DEK sync, then back to the original mode.
+     */
+    public void setMode(String mode) {
+        String body = "{\"mode\":\"" + mode + "\"}";
+        HttpRequest req = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/mode"))
+                .header("Content-Type", "application/vnd.schemaregistry.v1+json")
+                .header("Authorization", authHeader)
+                .PUT(HttpRequest.BodyPublishers.ofString(body))
+                .build();
+        try {
+            HttpResponse<String> resp = httpClient.send(req, HttpResponse.BodyHandlers.ofString());
+            if (resp.statusCode() != 200) {
+                throw new RuntimeException("setMode(" + mode + ") failed [" + resp.statusCode() + "]: " + resp.body());
+            }
+            log.info("SR mode set to {} @ {}", mode, baseUrl);
+        } catch (IOException | InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("setMode request failed", e);
+        }
+    }
+
+    /**
+     * Returns the current global Schema Registry mode.
+     */
+    public String getMode() {
+        HttpRequest req = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/mode"))
+                .header("Authorization", authHeader)
+                .GET()
+                .build();
+        try {
+            HttpResponse<String> resp = httpClient.send(req, HttpResponse.BodyHandlers.ofString());
+            if (resp.statusCode() != 200) {
+                throw new RuntimeException("getMode failed [" + resp.statusCode() + "]: " + resp.body());
+            }
+            // Response: {"mode":"READWRITE"} or {"mode":"IMPORT"}
+            java.util.regex.Matcher m = java.util.regex.Pattern
+                    .compile("\"mode\"\\s*:\\s*\"([^\"]+)\"")
+                    .matcher(resp.body());
+            return m.find() ? m.group(1) : "UNKNOWN";
+        } catch (IOException | InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("getMode request failed", e);
+        }
+    }
+
+    // ── JSON array parsing (without external JSON dependency) ───────────────
+
+    private List<String> parseJsonStringArray(String json) {
+        // Input: ["a","b","c"] or []
+        String inner = json.trim().replaceAll("^\\[|\\]$", "").trim();
+        if (inner.isEmpty()) return List.of();
+        List<String> result = new java.util.ArrayList<>();
+        for (String part : inner.split(",")) {
+            String s = part.trim().replaceAll("^\"|\"$", "");
+            if (!s.isEmpty()) result.add(s);
+        }
+        return result;
+    }
+
+    private List<Integer> parseJsonIntArray(String json) {
+        // Input: [1,2,3] or []
+        String inner = json.trim().replaceAll("^\\[|\\]$", "").trim();
+        if (inner.isEmpty()) return List.of();
+        List<Integer> result = new java.util.ArrayList<>();
+        for (String part : inner.split(",")) {
+            String s = part.trim();
+            if (!s.isEmpty()) result.add(Integer.parseInt(s));
+        }
+        return result;
     }
 
     private void post(String url, String body, String opName, boolean allow409) {
