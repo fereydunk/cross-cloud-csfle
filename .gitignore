@@ -1,0 +1,14 @@
+target/
+*.class
+*.jar
+
+# Deployment config with real credentials — use deployment.properties.template
+deployment/deployment.properties
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# OS
+.DS_Store

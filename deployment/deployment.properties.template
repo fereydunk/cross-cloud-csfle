@@ -1,0 +1,52 @@
+# Cross-Cloud CSFLE Deployment Configuration
+# Copy to deployment.properties and fill in your values.
+# Never commit deployment.properties — it contains secrets.
+#
+# KMS type is inferred automatically for CSP-native KEKs:
+#   AWS   — arn:aws:kms:<region>:<account>:key/<id>
+#   GCP   — projects/.../locations/.../keyRings/.../cryptoKeys/...
+#   Azure — https://<name>.vault.azure.net/keys/...
+#
+# For HashiCorp Vault or CipherTrust, set rule.<field>.src.kek.type / dst.kek.type explicitly.
+
+# ── Source Kafka Cluster ─────────────────────────────────────────────────────
+src.bootstrap.servers=<src-bootstrap>:9092
+src.kafka.api.key=<src-kafka-api-key>
+src.kafka.api.secret=<src-kafka-api-secret>
+
+# ── Source Schema Registry ───────────────────────────────────────────────────
+src.sr.url=https://<src-sr-endpoint>
+src.sr.api.key=<src-sr-api-key>
+src.sr.api.secret=<src-sr-api-secret>
+
+# ── Destination Kafka Cluster ────────────────────────────────────────────────
+dst.bootstrap.servers=<dst-bootstrap>:9092
+dst.kafka.api.key=<dst-kafka-api-key>
+dst.kafka.api.secret=<dst-kafka-api-secret>
+
+# ── Destination Schema Registry ──────────────────────────────────────────────
+dst.sr.url=https://<dst-sr-endpoint>
+dst.sr.api.key=<dst-sr-api-key>
+dst.sr.api.secret=<dst-sr-api-secret>
+
+# ── Topic ─────────────────────────────────────────────────────────────────────
+topic=<your-topic>
+
+# ── Encryption Rules ──────────────────────────────────────────────────────────
+# One rule per sensitive field. Repeat this block for each field.
+
+# Example — Case 1 (AWS → GCP, types inferred from URI):
+# rule.ssn.field=ssn
+# rule.ssn.src.kek.id=arn:aws:kms:us-east-1:123456789012:key/abc-def
+# rule.ssn.dst.kek.id=projects/my-proj/locations/us/keyRings/my-ring/cryptoKeys/my-key
+
+# Example — Case 4 (both external, explicit types required):
+# rule.ssn.field=ssn
+# rule.ssn.src.kek.id=https://vault.example.com/v1/transit/keys/my-key
+# rule.ssn.src.kek.type=HASHICORP_VAULT
+# rule.ssn.dst.kek.id=https://ciphertrust.example.com/api/v1/vault/keys/my-key
+# rule.ssn.dst.kek.type=CIPHERTRUST
+
+rule.ssn.field=ssn
+rule.ssn.src.kek.id=<src-kek-id>
+rule.ssn.dst.kek.id=<dst-kek-id>
