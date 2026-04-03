@@ -1,0 +1,49 @@
+# Cross-Cloud CSFLE — Docker Compose
+#
+# Prerequisites:
+#   1. Copy deployment/deployment.properties.template → deployment/deployment.properties and fill in values.
+#   2. Set GOOGLE_APPLICATION_CREDENTIALS to a GCP service account JSON file with
+#      roles/cloudkms.cryptoKeyDecrypterEncrypter on the GCP KMS key.
+#      (For local dev: gcloud auth application-default login and point to ~/.config/gcloud/application_default_credentials.json)
+#   3. Set AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY (and optionally AWS_SESSION_TOKEN).
+#
+# Run order:
+#   docker compose run provisioner   # one-time DEK setup
+#   docker compose run producer      # produce 10 CSFLE-encrypted records
+#   docker compose run consumer      # decrypt from GCP mirror topic
+
+x-aws-env: &aws-env
+  AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+  AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+  AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
+  AWS_REGION: ${AWS_REGION:-us-east-2}
+
+x-gcp-env: &gcp-env
+  GOOGLE_APPLICATION_CREDENTIALS: /gcp-creds.json
+
+x-volumes: &shared-vols
+  - ./deployment/deployment.properties:/config/deployment.properties:ro
+  - ${GOOGLE_APPLICATION_CREDENTIALS:-/dev/null}:/gcp-creds.json:ro
+
+services:
+
+  provisioner:
+    build: .
+    command: ["provision", "/config/deployment.properties"]
+    environment:
+      <<: [*aws-env, *gcp-env]
+    volumes: *shared-vols
+
+  producer:
+    build: .
+    command: ["producer", "/config/deployment.properties"]
+    environment:
+      <<: [*aws-env, *gcp-env]
+    volumes: *shared-vols
+
+  consumer:
+    build: .
+    command: ["consumer", "/config/deployment.properties"]
+    environment:
+      <<: *gcp-env
+    volumes: *shared-vols

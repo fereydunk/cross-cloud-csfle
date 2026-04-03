@@ -45,17 +45,14 @@ public class CrossCloudCsfleRunner {
         log.info("Destination cluster: {}", props.getProperty("dst.bootstrap.servers"));
         log.info("Topic           : {}", props.getProperty("topic"));
 
+        // Both src and dst DEK subjects are written to the src SR so the schema exporter
+        // can replicate them to the dst SR (which is in IMPORT mode — no direct writes allowed).
         ConfluentSchemaRegistryClient srcSrClient = new ConfluentSchemaRegistryClient(
                 props.getProperty("src.sr.url"),
                 props.getProperty("src.sr.api.key"),
                 props.getProperty("src.sr.api.secret"));
 
-        ConfluentSchemaRegistryClient dstSrClient = new ConfluentSchemaRegistryClient(
-                props.getProperty("dst.sr.url"),
-                props.getProperty("dst.sr.api.key"),
-                props.getProperty("dst.sr.api.secret"));
-
-        CrossCloudCsfleEngine engine = new CrossCloudCsfleEngine(srcSrClient, dstSrClient);
+        CrossCloudCsfleEngine engine = new CrossCloudCsfleEngine(srcSrClient, srcSrClient);
 
         List<EncryptionRule> rules = buildRules(props);
         log.info("Provisioning {} encryption rule(s)...", rules.size());
@@ -76,7 +73,7 @@ public class CrossCloudCsfleRunner {
         }
         log.info("");
         log.info("src-wrapped DEK persisted to : {}", props.getProperty("src.sr.url"));
-        log.info("dst-wrapped DEK published to : {}", props.getProperty("dst.sr.url"));
+        log.info("dst-wrapped DEK persisted to : {} (schema exporter replicates to dst SR)", props.getProperty("src.sr.url"));
         log.info("Records will flow via cluster linking: {} → {}",
                 props.getProperty("src.bootstrap.servers"),
                 props.getProperty("dst.bootstrap.servers"));
