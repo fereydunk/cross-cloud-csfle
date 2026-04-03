@@ -4,6 +4,7 @@ import io.confluent.csfle.crosscloud.app.CrossCloudConsumer;
 import io.confluent.csfle.crosscloud.app.CrossCloudProducer;
 import io.confluent.csfle.crosscloud.app.DekSyncApp;
 import io.confluent.csfle.crosscloud.app.DestinationConsumerAwsAttempt;
+import io.confluent.csfle.crosscloud.app.SplitProvisionDstApp;
 import io.confluent.csfle.crosscloud.app.SourceConsumer;
 import io.confluent.csfle.crosscloud.app.SourceConsumerGcpAttempt;
 
@@ -14,6 +15,7 @@ import java.util.Arrays;
  *
  * Usage:
  *   java -jar cross-cloud-csfle.jar provision                        deployment/deployment.properties
+ *   java -jar cross-cloud-csfle.jar provision-dst                    deployment/deployment.properties
  *   java -jar cross-cloud-csfle.jar producer                         deployment/deployment.properties
  *   java -jar cross-cloud-csfle.jar consumer                         deployment/deployment.properties
  *   java -jar cross-cloud-csfle.jar sync                             deployment/deployment.properties
@@ -37,6 +39,7 @@ public class Main {
 
         switch (mode) {
             case "provision"                         -> CrossCloudCsfleRunner.main(rest);
+            case "provision-dst"                     -> SplitProvisionDstApp.main(rest);
             case "producer"                          -> CrossCloudProducer.main(rest);
             case "consumer"                          -> CrossCloudConsumer.main(rest);
             case "sync"                              -> DekSyncApp.main(rest);

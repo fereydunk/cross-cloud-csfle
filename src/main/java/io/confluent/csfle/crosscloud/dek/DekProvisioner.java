@@ -42,6 +42,65 @@ public class DekProvisioner {
     }
 
     /**
+     * Single-KMS mode: src and dst use the same KMS type.
+     *
+     * Wraps the DEK once with the src KEK and stores the same ciphertext under both the
+     * src and dst subjects. One KMS call instead of two. Automatically used when the
+     * provisioner detects that src and dst KEKs resolve to the same KMS type — the
+     * {@code dek.provisioning.mode} property is irrelevant in this case.
+     *
+     * @param rule the encryption rule (srcKek and dstKek must be on the same KMS type)
+     * @return result with the same WrappedDek for both src and dst
+     */
+    public DekProvisioningResult provisionSingle(EncryptionRule rule) {
+        log.info("Single-KMS provisioning for field '{}' — src and dst use the same KMS ({}), " +
+                 "wrapping once (dek.provisioning.mode ignored)",
+                rule.getField(), rule.getSrcKek().resolveType());
+
+        byte[] plaintextDek = generateDek();
+        try {
+            WrappedDek wrapped = wrapWithSrc(rule, plaintextDek);
+            persistToSrc(rule, wrapped);
+            sendToDst(rule, wrapped);
+            log.info("DEK for field '{}' provisioned with single wrap — same ciphertext stored " +
+                     "as both src and dst subjects", rule.getField());
+            return new DekProvisioningResult(rule.getField(), wrapped, wrapped);
+        } finally {
+            Arrays.fill(plaintextDek, (byte) 0);
+        }
+    }
+
+    /**
+     * Split-mode phase 1: dst KMS is NOT reachable from the provisioner on the source side.
+     *
+     * Wraps the DEK with the src KEK and stores the src subject. Also writes the plaintext
+     * DEK as a temporary transfer subject in the src SR so that schema linking can carry it
+     * to the dst SR over TLS. Phase 2 ({@code provision-dst}) must be run on the destination
+     * side to complete provisioning: it reads the transfer subject, wraps with the dst KEK,
+     * stores the dst subject, and deletes the transfer subject.
+     *
+     * @param rule the encryption rule
+     * @return result with only srcWrapped set — dstWrapped is null until phase 2 completes
+     */
+    public DekProvisioningResult provisionSplitSrc(EncryptionRule rule) {
+        log.info("Split provisioning phase 1 for field '{}' — wrapping with src KEK only, " +
+                 "plaintext DEK will be transferred via schema linking for dst-side wrapping",
+                rule.getField());
+
+        byte[] plaintextDek = generateDek();
+        try {
+            WrappedDek wrapped = wrapWithSrc(rule, plaintextDek);
+            persistToSrc(rule, wrapped);
+            srcRegistry.writeTransferSubject(rule.getField(), plaintextDek);
+            log.info("Phase 1 complete for field '{}'. Run 'provision-dst' on the destination " +
+                     "side after schema linking replicates the transfer subject.", rule.getField());
+            return new DekProvisioningResult(rule.getField(), wrapped, null);
+        } finally {
+            Arrays.fill(plaintextDek, (byte) 0);
+        }
+    }
+
+    /**
      * DR mode: provisions a DEK using only the surviving KMS.
      *
      * Used when one KMS is unreachable (e.g. AWS is down, GCP is surviving).

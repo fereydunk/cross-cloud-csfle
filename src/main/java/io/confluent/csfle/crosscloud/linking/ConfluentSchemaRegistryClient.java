@@ -133,6 +133,126 @@ public class ConfluentSchemaRegistryClient implements SrcSchemaRegistryClient, D
                 field, role, subject, baseUrl);
     }
 
+    // ── Split-mode provisioning: transfer subject ─────────────────────────────
+
+    /**
+     * Writes a temporary transfer subject containing the base64-encoded plaintext DEK.
+     * Used in split-mode provisioning (phase 1, source side).
+     * Schema linking replicates this subject to the destination SR over TLS.
+     * Subject name: cross-cloud-dek-{field}-transfer
+     */
+    @Override
+    public void writeTransferSubject(String field, byte[] plaintextDek) {
+        String subject  = transferSubjectName(field);
+        String b64Dek   = Base64.getEncoder().encodeToString(plaintextDek);
+
+        String schemaStr = """
+                {
+                  "type": "object",
+                  "title": "CrossCloudDekTransfer",
+                  "properties": {
+                    "field":        {"type": "string", "const": "%s"},
+                    "plaintextDek": {"type": "string", "const": "%s"}
+                  }
+                }
+                """.formatted(field, b64Dek).replace("\n", "\\n").strip();
+
+        String requestBody = """
+                {"schemaType":"JSON","schema":"%s"}
+                """.formatted(schemaStr.replace("\"", "\\\"")).strip();
+
+        post(baseUrl + "/subjects/" + subject + "/versions", requestBody,
+                "DEK transfer subject for field " + field, true);
+        log.info("Transfer subject '{}' written to SR @ {} — schema linking will replicate to dst SR",
+                subject, baseUrl);
+    }
+
+    /**
+     * Reads the plaintext DEK from a transfer subject in this SR.
+     * Used in split-mode provisioning (phase 2, destination side).
+     * Returns the raw plaintext DEK bytes — caller must zero after use.
+     */
+    public byte[] readTransferSubject(String field) {
+        String subject = transferSubjectName(field);
+        String url = baseUrl + "/subjects/" + subject + "/versions/latest";
+        HttpRequest req = HttpRequest.newBuilder()
+                .uri(URI.create(url))
+                .header("Authorization", authHeader)
+                .GET()
+                .build();
+        try {
+            HttpResponse<String> resp = httpClient.send(req, HttpResponse.BodyHandlers.ofString());
+            if (resp.statusCode() != 200) {
+                throw new RuntimeException(
+                        "Transfer subject '" + subject + "' not found [" + resp.statusCode() + "]: " +
+                        resp.body() + " — run 'provision' (phase 1) on the source side first, " +
+                        "then wait for schema linking to replicate.");
+            }
+            String responseJson = resp.body();
+            String schema = extractSchemaString(responseJson);
+            String b64Dek = extractConst(schema, "plaintextDek");
+            log.info("Transfer subject '{}' read from SR @ {}", subject, baseUrl);
+            return Base64.getDecoder().decode(b64Dek);
+        } catch (java.io.IOException | InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("readTransferSubject failed for field '" + field + "'", e);
+        }
+    }
+
+    /**
+     * Deletes the transfer subject from this SR (both soft-delete and hard-delete).
+     * Called by phase 2 after the plaintext DEK has been wrapped and stored.
+     */
+    public void deleteTransferSubject(String field) {
+        String subject = transferSubjectName(field);
+        delete(baseUrl + "/subjects/" + subject, "soft-delete transfer subject " + subject);
+        delete(baseUrl + "/subjects/" + subject + "?permanent=true",
+                "hard-delete transfer subject " + subject);
+        log.info("Transfer subject '{}' deleted from SR @ {}", subject, baseUrl);
+    }
+
+    private static String transferSubjectName(String field) {
+        return "cross-cloud-dek-" + field + "-transfer";
+    }
+
+    private String extractSchemaString(String responseJson) {
+        java.util.regex.Matcher m = java.util.regex.Pattern
+                .compile("\"schema\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"")
+                .matcher(responseJson);
+        if (!m.find()) throw new RuntimeException("Could not find 'schema' field in SR response");
+        return m.group(1)
+                .replace("\\\"", "\"")
+                .replace("\\n", "\n")
+                .replace("\\\\", "\\");
+    }
+
+    private String extractConst(String json, String propertyName) {
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile(
+                "\"" + java.util.regex.Pattern.quote(propertyName) +
+                "\"\\s*:\\s*\\{[^}]*\"const\"\\s*:\\s*\"([^\"]+)\"")
+                .matcher(json);
+        if (!m.find()) throw new RuntimeException(
+                "Property '" + propertyName + "' not found in transfer subject schema");
+        return m.group(1);
+    }
+
+    private void delete(String url, String opName) {
+        HttpRequest req = HttpRequest.newBuilder()
+                .uri(URI.create(url))
+                .header("Authorization", authHeader)
+                .DELETE()
+                .build();
+        try {
+            HttpResponse<String> resp = httpClient.send(req, HttpResponse.BodyHandlers.ofString());
+            if (resp.statusCode() != 200 && resp.statusCode() != 404) {
+                throw new RuntimeException(opName + " failed [" + resp.statusCode() + "]: " + resp.body());
+            }
+        } catch (java.io.IOException | InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException(opName + " request failed", e);
+        }
+    }
+
     // ── Public methods used by DekSyncer ─────────────────────────────────────
 
     /**

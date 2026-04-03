@@ -401,7 +401,9 @@ complex and fragile.
 | `DekSyncer` | New | ✅ Done | Compares SRs, re-wraps missing versions, SR mode management, idempotent |
 | `DekSyncApp` | New | ✅ Done | CLI entrypoint for `sync` mode; auto-detects surviving/recovering role |
 | `SyncReport` | New | ✅ Done | Completion gate — non-zero exit and error list on any failure |
-| `Main` | Modify | ✅ Done | `sync` mode wired to `DekSyncApp` |
+| `DekProvisioningMode` | New | ✅ Done | Enum: `DUAL` / `SPLIT`; single-KMS auto-detected |
+| `SplitProvisionDstApp` | New | ✅ Done | Phase 2 runner for split-mode provisioning |
+| `Main` | Modify | ✅ Done | `sync` and `provision-dst` modes wired |
 | `FailbackRunner` | New | ⬜ Not started | Full Confluent REST API orchestration (link + exporter + DEK sync sequence) |
 
 `FailbackRunner` would automate the 22-step runbook below. Until it exists, operators

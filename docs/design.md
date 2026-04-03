@@ -346,6 +346,60 @@ acceptable storage overhead in exchange for full decoupling.
 
 ---
 
+## DEK Provisioning Mode
+
+The provisioner supports three situations depending on KMS topology:
+
+| Situation | KMS configuration | Behaviour | Property |
+|---|---|---|---|
+| 1 | src and dst use the same KMS type | One wrap call. Same ciphertext stored as both src and dst subjects. `dek.provisioning.mode` is ignored. | Not applicable |
+| 2 | Different KMS types, both reachable from provisioner | Two wrap calls. Encrypted DEK replicated to dst SR via schema linking. | `dual` (default) |
+| 3 | Different KMS types, dst KMS not reachable from provisioner | Phase 1 (source): src wrap + plaintext DEK written to transfer subject. Phase 2 (destination): read transfer subject, dst wrap, delete transfer subject. | `split` |
+
+### Situation 1 — same KMS (auto-detected)
+
+When `srcKek.resolveType() == dstKek.resolveType()`, the provisioner wraps once using the src
+KEK and stores the same ciphertext under both the `-src` and `-dst` subjects. No second KMS
+call is made. The `dek.provisioning.mode` property has no effect for these rules.
+
+### Situation 2 — dual (default)
+
+The existing provisioning flow. Both wrap calls happen in one pass. The `-dst` subject is
+written to the source SR and schema linking replicates it to the destination SR.
+
+### Situation 3 — split (two-phase)
+
+Used when the source-side provisioner cannot reach the destination KMS (e.g. source is
+on-prem with a local KMS; destination is in a cloud with a cloud-native KMS).
+
+```
+Phase 1 — source side (java -jar ... provision deployment.properties):
+  1. Generate DEK in memory
+  2. Wrap with src KEK → store as src subject in src SR
+  3. Write plaintext DEK (base64) as a temporary transfer subject in src SR
+  4. Schema linking replicates transfer subject to dst SR over TLS
+  5. Zero plaintext DEK
+
+Phase 2 — destination side (java -jar ... provision-dst deployment.properties):
+  1. Switch dst SR to READWRITE temporarily
+  2. Read transfer subject from dst SR → decode plaintext DEK
+  3. Wrap with dst KEK → store as dst subject in dst SR
+  4. Delete transfer subject from dst SR
+  5. Restore dst SR to original mode
+  6. Zero plaintext DEK
+```
+
+The transfer subject (`cross-cloud-dek-{field}-transfer`) is protected in transit by schema
+linking TLS and at rest by Schema Registry authentication. It exists only for the window
+between phase 1 and phase 2 — it is deleted as soon as phase 2 completes.
+
+**Hard constraint relaxation:** split mode is the only situation where plaintext DEK material
+exists outside the provisioner JVM (stored temporarily in Schema Registry). This is an
+explicit trade-off accepted for deployments where dual-KMS access from a single host is not
+possible. See constraint 3 in [Hard Constraints](#hard-constraints).
+
+---
+
 ## What This Design Does Not Cover
 
 - **DEK rotation:** Rotating to a new DEK requires re-provisioning (steps 1–4) and is

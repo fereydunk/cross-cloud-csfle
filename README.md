@@ -201,6 +201,7 @@ cross-cloud-csfle/
 │   │   ├── app/
 │   │   │   ├── CrossCloudProducer.java              # AWS: provision + encrypt + produce
 │   │   │   ├── CrossCloudConsumer.java              # GCP: fetch dst DEK + decrypt + consume
+│   │   │   ├── SplitProvisionDstApp.java            # Split-mode phase 2: wrap with dst KEK, delete transfer subject
 │   │   │   ├── DekSyncApp.java                      # Pre-failback DEK sync (re-wrap + push to recovering SR)
 │   │   │   ├── SourceConsumer.java                  # AWS cluster + AWS KMS (positive test)
 │   │   │   ├── SourceConsumerGcpAttempt.java        # AWS cluster + GCP KMS (negative test)
@@ -209,7 +210,8 @@ cross-cloud-csfle/
 │   │   │   ├── EncryptionRule.java      # One rule = one field + src KEK + dst KEK
 │   │   │   ├── KekReference.java        # KEK id + optional explicit type
 │   │   │   ├── KmsType.java             # Enum: AWS, GCP, AZURE, HASHICORP_VAULT, CIPHERTRUST
-│   │   │   └── KmsTypeInferrer.java     # URI-based type inference for CSP KEKs
+│   │   │   ├── KmsTypeInferrer.java     # URI-based type inference for CSP KEKs
+│   │   │   └── DekProvisioningMode.java # Enum: DUAL (default) / SPLIT
 │   │   ├── crypto/
 │   │   │   └── FieldEncryptor.java      # AES-256-GCM field encrypt/decrypt (dekVersion:iv:ct wire format)
 │   │   ├── dek/
@@ -273,6 +275,41 @@ mvn test
 ```
 
 Unit tests cover `EncryptionRule` validation, `KmsTypeInferrer` URI patterns, and `DekProvisioner` error handling using Mockito mocks. No real KMS or Schema Registry calls are made in tests.
+
+---
+
+## DEK Provisioning Mode
+
+Controls how DEKs are wrapped and distributed when source and destination use different KMS systems. Set `dek.provisioning.mode` in `deployment.properties`.
+
+| Situation | Example | Mode | Behaviour |
+|---|---|---|---|
+| Same KMS type | Both AWS KMS | *(auto-detected)* | One wrap call. `dek.provisioning.mode` ignored. |
+| Different KMS, both reachable | On-prem Vault + AWS KMS | `dual` (default) | Two wrap calls. Encrypted DEK replicated via schema linking. |
+| Different KMS, dst not reachable | On-prem KMS + cloud KMS | `split` | Two-phase. Source wraps with src KEK. Destination wraps with dst KEK via schema linking handoff. |
+
+### Split mode — two-phase provisioning
+
+Used when the source-side provisioner cannot reach the destination KMS (e.g. self-managed on-prem source, cloud destination).
+
+```bash
+# Phase 1 — source side: set dek.provisioning.mode=split in deployment.properties
+java -jar $JAR provision $PROPS
+# Wraps with src KEK. Writes plaintext DEK as a transfer subject in src SR.
+# Schema linking replicates the transfer subject to dst SR over TLS.
+
+# Wait for schema linking to replicate (check exporter status)
+
+# Phase 2 — destination side: same deployment.properties with dst SR credentials and dst KEK
+java -jar $JAR provision-dst $PROPS
+# Reads plaintext DEK from transfer subject in dst SR.
+# Wraps with dst KEK. Stores dst subject. Deletes transfer subject.
+# Plaintext DEK zeroed from memory immediately after wrapping.
+```
+
+The transfer subject exists only between phase 1 and phase 2. It is protected in transit by schema linking TLS and at rest by Schema Registry API key authentication.
+
+See [`docs/design.md`](docs/design.md) for the full decision record including the security trade-off.
 
 ---
 

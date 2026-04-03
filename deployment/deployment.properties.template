@@ -32,6 +32,23 @@ dst.sr.api.secret=<dst-sr-api-secret>
 # ── Topic ─────────────────────────────────────────────────────────────────────
 topic=<your-topic>
 
+# ── DEK Provisioning Mode ────────────────────────────────────────────────────
+# Only relevant when src and dst KEKs are on DIFFERENT KMS systems.
+# Automatically ignored when src and dst resolve to the same KMS type — the
+# provisioner wraps once and stores the same ciphertext for both subjects.
+#
+# dual (default): both KMS systems are reachable from the provisioner.
+#   Two wrap calls. Schema linking replicates the encrypted DEK to the dst SR.
+#   Omit this property to use dual mode.
+#
+# split: dst KMS is NOT reachable from the provisioner on the source side.
+#   Phase 1 (source): provision — wraps with src KEK, writes plaintext DEK to
+#     a temporary transfer subject; schema linking carries it to dst SR over TLS.
+#   Phase 2 (destination): provision-dst — reads transfer subject, wraps with
+#     dst KEK, stores dst subject, deletes transfer subject.
+#
+# dek.provisioning.mode=dual
+
 # ── Encryption Rules ──────────────────────────────────────────────────────────
 # One rule per sensitive field. Repeat this block for each field.
 

@@ -74,7 +74,7 @@ public class CrossCloudProducer {
                 cfg.getProperty("src.sr.api.secret"));
 
         CrossCloudCsfleEngine engine = new CrossCloudCsfleEngine(srcSr, srcSr);
-        engine.provisionAll(buildRules(cfg));
+        engine.provisionAll(buildRules(cfg), io.confluent.csfle.crosscloud.config.DekProvisioningMode.DUAL);
         log.info("DEKs provisioned.");
 
         // ── Step 2: Fetch + unwrap src DEK ────────────────────────────────
