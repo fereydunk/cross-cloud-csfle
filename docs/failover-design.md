@@ -4,6 +4,8 @@
 
 This document captures the design decisions and final model for handling DR failover,
 failback, and DEK lifecycle management across a broken or re-established cluster link.
+It also documents how the DEK sync step integrates into Confluent's native failback
+sequence of cluster link and schema exporter operations.
 
 ---
 
@@ -72,7 +74,7 @@ Surviving side (e.g. GCP, AWS KMS unreachable):
 ```
 
 New records are produced normally. The DEK version is embedded in each encrypted field
-value so consumers can resolve the correct DEK regardless of how many rotations have occurred.
+value so consumers can resolve the correct DEK regardless of how many rotations occurred.
 
 ---
 
@@ -85,60 +87,237 @@ Before (current):   base64(iv):base64(ciphertext)
 After:              dekVersion:base64(iv):base64(ciphertext)
 ```
 
-- `FieldEncryptor.encrypt()` prepends the SR schema version of the DEK used.
+- `FieldEncryptor.encrypt()` prepends the Schema Registry schema version of the DEK used.
 - `FieldEncryptor.decrypt()` parses the version prefix, passes it to `DekFetcher`.
 - `DekFetcher.fetchPlaintextDek()` resolves by explicit version when provided,
-  falls back to `latest` for records written before versioned wire format was deployed.
+  falls back to `latest` for records written before the versioned wire format was deployed.
 
-This is a small, self-describing change. Old records (no version prefix) are treated
-as version 1. No migration required.
+Old records (no version prefix) are treated as version 1. No migration required.
 
 ---
 
-## Link Re-establishment and DEK Sync
+## How Confluent Failback Works
 
-When the link is re-established after an outage that included DEK rotation, the recovering
-side is missing the AWS-wrapped copy of any DEKs provisioned during the outage.
+Confluent has **no native hooks** — no pre-promotion event, no pre-link-creation callback,
+no extension point in cluster linking or schema linking. Every step in failover and failback
+is an explicit CLI command or REST API call, which means the caller controls the ordering.
+This is the integration point for the DEK sync step.
 
-**The sync step must complete before records begin flowing across the link.**
+### Confluent failover sequence (AWS down, GCP takes over)
 
 ```
-DekSyncer (runs at link re-establishment time):
+1. confluent schema-registry exporter pause <exporter> --sr-endpoint <aws-sr>
+   (or exporter is already dead if AWS is fully down)
 
-  For each DEK subject in the surviving SR:
-    For each version not present (as a counterpart wrap) in the recovering SR:
-      1. Fetch wrapped DEK from surviving SR
-      2. Unwrap with surviving KMS  → plaintext DEK (in memory only)
-      3. Wrap with recovering KMS   → encrypted DEK
-      4. Push to recovering SR
+2. confluent schema-registry mode update --mode READWRITE --sr-endpoint <gcp-sr>
+   GCP SR exits IMPORT mode. Producers can now register new schemas and DEK subjects.
+
+3. confluent kafka mirror promote --all --link <aws-to-gcp-link> --cluster <gcp-cluster>
+   Mirror topics become writable on GCP. The cluster link is severed.
+
+4. Redirect producers and consumers to GCP cluster + GCP SR.
+   GCP side operates independently using existing dst-wrapped DEKs.
+```
+
+### Confluent failback sequence (AWS recovers, returning to primary)
+
+There are no shortcuts — failback requires a temporary reverse link and schema exporter.
+
+```
+PHASE 1 — Catch up records from GCP back to AWS
+
+1. confluent kafka link create <gcp-to-aws-link> \
+     --cluster <aws-cluster> \
+     --source-cluster-id <gcp-cluster> \
+     --source-bootstrap-server <gcp-bootstrap>
+
+2. confluent kafka mirror create <topic> \
+     --link <gcp-to-aws-link> \
+     --cluster <aws-cluster>
+   (Repeat for each topic. AWS mirror topics now consume from GCP.)
+
+3. Poll until mirror lag reaches zero:
+   confluent kafka mirror describe <topic> --link <gcp-to-aws-link> --cluster <aws-cluster>
+
+PHASE 2 — Catch up schemas from GCP back to AWS
+
+4. confluent schema-registry mode update --mode IMPORT --sr-endpoint <aws-sr>
+   AWS SR enters IMPORT mode so the reverse exporter can write to it safely.
+
+5. confluent schema-registry exporter create <gcp-to-aws-exporter> \
+     --subjects "*" \
+     --sr-endpoint <gcp-sr> \
+     --destination-sr-url <aws-sr>
+   AWS SR now receives all schemas registered on GCP during the DR period.
+
+6. Wait until exporter status is RUNNING and all subjects are replicated.
+
+PHASE 3 — DEK sync  ← injection point
+   (See next section for full detail.)
+
+PHASE 4 — Cut over back to AWS
+
+7. confluent kafka mirror promote --all --link <gcp-to-aws-link> --cluster <aws-cluster>
+   AWS topics become writable again.
+
+8. confluent kafka link delete <gcp-to-aws-link> --cluster <aws-cluster>
+
+9. Redirect producers and consumers back to AWS cluster + AWS SR.
+
+PHASE 5 — Restore original topology
+
+10. confluent schema-registry exporter delete <gcp-to-aws-exporter> --sr-endpoint <gcp-sr>
+
+11. confluent schema-registry mode update --mode READWRITE --sr-endpoint <aws-sr>
+    AWS SR exits IMPORT mode. Producers can write schemas directly again.
+
+12. confluent kafka link create <aws-to-gcp-link> \
+      --cluster <gcp-cluster> \
+      --source-cluster-id <aws-cluster> \
+      --source-bootstrap-server <aws-bootstrap>
+
+13. confluent kafka mirror create <topic> --link <aws-to-gcp-link> --cluster <gcp-cluster>
+    GCP mirror topics resume — GCP returns to DR role.
+
+14. confluent schema-registry exporter create <aws-to-gcp-exporter> \
+      --subjects "*" \
+      --sr-endpoint <aws-sr> \
+      --destination-sr-url <gcp-sr>
+
+15. confluent schema-registry mode update --mode IMPORT --sr-endpoint <gcp-sr>
+    GCP SR returns to IMPORT mode — schema exporter resumes full control.
+```
+
+---
+
+## DEK Sync Integration Point
+
+The DEK sync step runs in **Phase 3**, between schema catch-up and topic promotion.
+At that point:
+- AWS SR is in IMPORT mode and has received all GCP-era schemas (including any DEK subjects
+  registered during the DR period).
+- GCP mirror lag on AWS is zero — AWS has all records.
+- Neither cluster has been promoted yet — no new records can be written anywhere.
+
+This is the clean, atomic window: data is frozen, both SRs are current, both KMS systems
+are reachable. The DEK sync runs here.
+
+```
+PHASE 3 — DEK sync (between steps 6 and 7 above)
+
+DekSyncer:
+  For each DEK subject in GCP SR:
+    For each version that exists in GCP SR but has no AWS-wrapped counterpart in AWS SR:
+      1. Fetch GCP-wrapped DEK from GCP SR
+      2. Unwrap with GCP KMS  → plaintext DEK (in memory only)
+      3. Wrap with AWS KMS    → AWS-wrapped DEK
+      4. Push to AWS SR       (AWS SR is in IMPORT mode — write is permitted by DekSyncer
+                               acting as the authoritative source, not a direct client write)
       5. Zero plaintext DEK
 
-  Validate: recovering SR has a wrapped copy for every version in surviving SR.
-  Only then: establish cluster link → records flow → recovering side decrypts everything.
+  Validate: every DEK version in GCP SR has a counterpart AWS-wrapped version in AWS SR.
+  Only then: proceed to Phase 4 (topic promotion).
 ```
 
-After sync, both SRs are fully symmetric. The recovering side can decrypt all records —
-both those produced before the outage (using the original DEK it already had) and those
-produced during the outage (using the newly synced DEK copies).
+Note on IMPORT mode and DEK writes: the Schema Registry IMPORT mode prevents schema
+registrations from regular producers/consumers. The DekSyncer writes DEK subjects as
+schema subjects (the existing schema subject fallback storage strategy). Writing in IMPORT
+mode requires the writer to present as an authoritative replication source. The current
+`ConfluentSchemaRegistryClient` uses the normal schema registration endpoint, which IMPORT
+mode will reject. Two options:
 
-If no rotation occurred during the outage, the sync step finds nothing to do and
-completes immediately. Re-establishing the link is then purely an infrastructure operation.
+- **Option A**: Switch AWS SR to READWRITE for the duration of the DEK sync, then back
+  to IMPORT. This is safe because DekSyncer is the only writer during this window.
+- **Option B**: Use the Schema Registry `/subjects/{subject}/versions` endpoint with the
+  `normalize=false` flag and the `X-Schema-Registry-Source` header that the schema
+  exporter itself uses, which IMPORT mode permits. Requires inspecting the exporter's
+  wire protocol.
+
+**Option A is simpler and correct for this PoC.** The mode switch adds two API calls
+and a few seconds; the correctness guarantee is clear.
+
+```
+DEK sync with mode management:
+
+  PUT /mode → READWRITE on AWS SR
+  Run DekSyncer (all versions, all subjects)
+  Validate completeness
+  PUT /mode → IMPORT on AWS SR
+  Proceed to Phase 4
+```
+
+### Why this is the right injection point
+
+| Property | Value |
+|---|---|
+| Both KMS systems reachable | Yes — AWS has recovered |
+| Both SRs current | Yes — schema exporter catch-up is complete |
+| No new records flowing | Yes — no topic has been promoted yet |
+| Sync is idempotent | Yes — DekSyncer skips versions already present |
+| Sync failure is recoverable | Yes — re-run DekSyncer, then retry promotion |
+| Records cannot arrive undecryptable | Yes — promotion is blocked until sync validates |
 
 ---
 
-## Failback (Recovering Side Becomes Primary Again)
+## Full Failback Runbook with DEK Sync
 
-After DEK sync is complete and the cluster link is re-established:
+```
+Step  Who        Action
+────  ─────────  ──────────────────────────────────────────────────────────────────
+ 1    Operator   Confirm AWS cluster is stable and fully recovered
+ 2    Confluent  Create reverse cluster link: GCP → AWS
+ 3    Confluent  Create mirror topics on AWS (from GCP)
+ 4    Operator   Wait: mirror lag = 0 on all topics
+ 5    Confluent  Set AWS SR → IMPORT mode
+ 6    Confluent  Create reverse schema exporter: GCP SR → AWS SR
+ 7    Operator   Wait: all GCP-era schemas replicated to AWS SR
+ 8    App        PUT /mode → READWRITE on AWS SR  (temporary, for DEK sync)
+ 9    App        Run DekSyncer: re-wrap GCP-era DEKs with AWS KMS, push to AWS SR
+10    App        Validate: every DEK version in GCP SR present in AWS SR
+11    App        PUT /mode → IMPORT on AWS SR
+12    Confluent  Pause all GCP mirror topics on AWS
+13    Confluent  Promote all AWS mirror topics (AWS becomes writable)
+14    Confluent  Delete reverse cluster link (GCP → AWS)
+15    Operator   Redirect producers and consumers to AWS
+16    Confluent  Delete reverse schema exporter (GCP SR → AWS SR)
+17    Confluent  PUT /mode → READWRITE on AWS SR
+18    Confluent  Create original cluster link: AWS → GCP
+19    Confluent  Create mirror topics on GCP (from AWS)
+20    Confluent  Create original schema exporter: AWS SR → GCP SR
+21    Confluent  PUT /mode → IMPORT on GCP SR
+22    Operator   Validate: produce a CSFLE test record on AWS, decrypt on both sides
+```
 
-1. Records replicate from surviving side to recovering side (cluster link).
-2. Schema exporter resumes, replicating any new schema subjects.
-3. Once the recovering side is caught up (lag = 0):
-   - Redirect producers back to the original primary.
-   - GCP SR returns to IMPORT mode (schema exporter resumes control).
-4. The surviving side returns to DR role — no crypto changes needed.
+Steps 8–11 are the DEK sync window. Everything before is Confluent infrastructure
+catch-up. Everything after is restoring the original topology.
 
-The recovering side needs no special handling. It has all DEK versions (from the sync step)
-and all records (from the cluster link). Normal operation resumes.
+---
+
+## Confluent REST API Reference for Automation
+
+```
+# Mirror topic operations
+GET    /kafka/v3/clusters/{id}/links/{link}/mirrors              # list mirrors + lag
+POST   /kafka/v3/clusters/{id}/links/{link}/mirrors/{topic}:pauseMirror
+POST   /kafka/v3/clusters/{id}/links/{link}/mirrors/{topic}:promoteMirror
+POST   /kafka/v3/clusters/{id}/links/{link}/mirrors:promoteMirror  # batch promote
+
+# Cluster link operations
+POST   /kafka/v3/clusters/{id}/links             # create link
+DELETE /kafka/v3/clusters/{id}/links/{link}      # delete link
+
+# Schema Registry mode
+GET    /mode                                     # get global mode
+PUT    /mode   {"mode": "READWRITE"|"IMPORT"}    # set global mode
+
+# Schema exporter
+GET    /exporters                                # list exporters
+POST   /exporters                                # create exporter
+PUT    /exporters/{name}/pause                   # pause
+PUT    /exporters/{name}/resume                  # resume
+GET    /exporters/{name}/status                  # check status
+DELETE /exporters/{name}                         # delete
+```
 
 ---
 
@@ -159,7 +338,7 @@ complicate the sync step without any benefit.
 ### Decision 2: Rotation during outage uses single-KMS wrap, deferred second wrap
 
 **Decision:** If rotation is required while one KMS is unreachable, generate a new DEK
-and wrap it with the available KMS only. The second wrap is deferred to the sync step
+and wrap it with the available KMS only. The second wrap is deferred to the DEK sync step
 when the link re-establishes and the other KMS becomes reachable again.
 
 **Why:** Blocking rotation until both KMS systems are available defeats the purpose of
@@ -186,17 +365,29 @@ indistinguishable from corrupt data at the application level.
 
 ---
 
-### Decision 4: DEK sync is a prerequisite for link establishment, not a background process
+### Decision 4: DEK sync is a prerequisite for topic promotion, not a background process
 
-**Decision:** The `DekSyncer` must complete successfully before the cluster link is
-brought up. Link establishment is blocked until sync validates that the recovering SR
-has a wrapped copy of every DEK version present in the surviving SR.
+**Decision:** `DekSyncer` must complete and validate successfully before any mirror topic
+is promoted on the recovering side. Promotion is blocked until sync is confirmed.
 
-**Why:** If the link comes up before sync completes, the recovering side receives records
-it cannot decrypt. There is no safe recovery from this without re-doing the sync and
-potentially reprocessing records. The cost of waiting for sync (seconds to minutes,
-depending on how many rotations occurred during the outage) is far lower than the cost
-of a decryption failure window on the recovering side.
+**Why:** If promotion happens before sync completes, the recovering side receives records
+it cannot decrypt. There is no safe recovery without re-doing the sync and potentially
+reprocessing records. The `pauseMirror` → DEK sync → `promoteMirror` sequence is the
+natural window Confluent's API provides — we use it.
+
+---
+
+### Decision 5: DEK sync runs with AWS SR briefly in READWRITE mode
+
+**Decision:** During the DEK sync window (steps 8–11 of the runbook), AWS SR is switched
+to READWRITE so that DekSyncer can write the re-wrapped DEK subjects. It is switched back
+to IMPORT immediately after sync completes.
+
+**Why:** The Schema Registry IMPORT mode rejects writes from normal clients. Switching to
+READWRITE for the sync window is safe because DekSyncer is the only writer during this
+window (mirror topics are paused, producers have not been redirected to AWS yet). The
+alternative — emulating the schema exporter wire protocol to write in IMPORT mode — is
+complex and fragile.
 
 ---
 
@@ -208,7 +399,8 @@ of a decryption failure window on the recovering side.
 | `DekFetcher` | Modify | Accept optional version; fetch by exact version or `latest` |
 | `DekProvisioner` | Modify | Accept optional dst KMS client; skip dst wrap when absent |
 | `DekSyncer` | New | Compares DEK subjects across two SRs; re-wraps and pushes missing copies |
-| `Main` | Modify | Add `sync` mode to dispatcher |
+| `FailbackRunner` | New | Automates the full failback runbook: Confluent API calls + DEK sync in correct order |
+| `Main` | Modify | Add `sync` and `failback` modes to dispatcher |
 
 ### Build order
 
@@ -217,7 +409,8 @@ of a decryption failure window on the recovering side.
 2. `DekProvisioner` — single-KMS path. Straightforward extension of existing logic.
 3. `DekSyncer` — core new primitive. Depends on both KMS clients and both SR clients
    being injectable, which the existing interfaces already support.
-4. `Main` dispatcher — add `sync` mode, update usage.
+4. `FailbackRunner` — orchestrates Confluent REST API calls and DekSyncer in sequence.
+5. `Main` dispatcher — add `sync` and `failback` modes, update usage.
 
 ---
 
@@ -225,8 +418,10 @@ of a decryption failure window on the recovering side.
 
 | Scenario | Behaviour |
 |---|---|
-| Sync step fails partway through | Idempotent — re-run DekSyncer; already-synced versions are skipped |
-| Link established before sync completes | Records arrive that cannot be decrypted — prevented by sync-first constraint |
-| Both KMS systems unreachable during outage | No rotation possible; existing DEK continues in use; no disruption to existing records |
-| Sync runs when no rotation occurred during outage | No-op; completes immediately; link proceeds |
-| Recovering SR already has a version (e.g. from a previous partial sync) | DekSyncer detects it is present and skips; no duplicate writes |
+| DEK sync fails partway through | Idempotent — re-run DekSyncer; already-synced versions are skipped |
+| Topic promoted before sync completes | Prevented by runbook ordering: sync validates before promotion |
+| Both KMS systems unreachable during outage | No rotation possible; existing DEK continues; no disruption |
+| Sync runs when no rotation occurred during outage | No-op; completes immediately; runbook proceeds |
+| Recovering SR already has a version (partial previous sync) | DekSyncer detects it present and skips; no duplicate writes |
+| Schema exporter catch-up incomplete when sync runs | Sync finds no GCP-era DEK subjects in AWS SR — detects mismatch, blocks promotion |
+| AWS SR stuck in READWRITE after sync crash | Next runbook run re-checks mode, sets IMPORT, continues from safe state |
