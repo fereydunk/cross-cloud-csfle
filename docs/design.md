@@ -127,13 +127,32 @@ KMS call is made.
 ```
 1. Generate a new DEK in memory (AES-256, SecureRandom).
 2. Wrap DEK with src KEK  → persist the encrypted DEK to src Schema Registry.
-3. Wrap DEK with dst KEK  → send the encrypted DEK to dst Schema Registry via schema linking.
-4. Only after both step 2 and step 3 succeed → begin using this DEK to encrypt field data.
-5. Encrypted records flow to dst cluster via cluster linking.
+3. Wrap DEK with dst KEK  → persist the encrypted DEK also to src Schema Registry
+                            under a "dst" subject name.
+4. Schema exporter replicates both subjects to dst Schema Registry automatically.
+5. Only after both step 2 and step 3 succeed → begin using this DEK to encrypt field data.
+6. Encrypted records flow to dst cluster via cluster linking.
 ```
 
 The DEK plaintext is zeroed from memory immediately after steps 2 and 3, regardless of
 whether they succeed or fail.
+
+### Why both DEK subjects are written to the source Schema Registry
+
+The destination Schema Registry is placed in **IMPORT mode** by the schema exporter
+(schema linking). In IMPORT mode, the Schema Registry rejects direct writes — only the
+exporter may write to it. Attempting to write the dst-wrapped DEK directly to the dst SR
+returns HTTP 422 (`Subject is not in read-write mode`).
+
+The solution is to write **both** wrapped DEK subjects (`-src` and `-dst`) to the **source**
+Schema Registry. The schema exporter then replicates both to the destination SR automatically,
+preserving the same subject names and schema IDs.
+
+```
+src SR subjects:                          dst SR subjects (replicated by exporter):
+  cross-cloud-dek-{field}-src  ──────→     cross-cloud-dek-{field}-src
+  cross-cloud-dek-{field}-dst  ──────→     cross-cloud-dek-{field}-dst
+```
 
 ### What is stored where
 
@@ -141,15 +160,16 @@ whether they succeed or fail.
 Source cluster                                  Destination cluster
 ──────────────────────────────────              ──────────────────────────────
 src Schema Registry:                            dst Schema Registry:
-  DEK encrypted with src KEK (persisted)          DEK encrypted with dst KEK (via schema linking)
+  DEK encrypted with src KEK (-src subject)       DEK encrypted with src KEK (-src, replicated)
+  DEK encrypted with dst KEK (-dst subject)       DEK encrypted with dst KEK (-dst, replicated)
 
 src Kafka topic:                                dst Kafka topic:
   Records with fields encrypted by DEK             Same records (via cluster linking)
 ```
 
-**Important:** The dst-wrapped DEK is **not** persisted at the source alongside records or in
-source storage of any kind. It is produced in memory, immediately sent to the dst Schema
-Registry via schema linking, and discarded. The source only retains the src-wrapped copy.
+The source producer unwraps the `-src` subject using AWS KMS.
+The destination consumer unwraps the `-dst` subject using GCP Cloud KMS.
+Neither side ever needs to call the other's KMS.
 
 ### Why the split between schema linking and cluster linking
 
@@ -174,24 +194,26 @@ cannot unwrap.**
 ```
 Source cluster                          Destination cluster
 ─────────────────────                   ─────────────────────
- Producer
+ Producer/Provisioner
    │
    ├─ Generate DEK (in memory only)
    ├─ Wrap w/ src KEK
-   │     └─ persist → src Schema Registry
+   │     └─ persist → src SR (subject: cross-cloud-dek-{field}-src)
    ├─ Wrap w/ dst KEK (in memory only)
-   │     └─ publish ───────────────────────→ dst Schema Registry  (schema linking)
+   │     └─ persist → src SR (subject: cross-cloud-dek-{field}-dst)
+   │                    ↓
+   │          Schema exporter replicates ─────────────────→ dst SR (both -src and -dst subjects)
    │
-   │  [abort and zero DEK if either wrap fails — no records produced]
+   │  [abort and zero DEK if either wrap/persist fails — no records produced]
    │
    ├─ Zero plaintext DEK from memory
    ├─ Encrypt field data with DEK
-   └─ Publish record ───────────────────────→ dst Kafka topic  (cluster linking)
-                                                   │
-                                              Consumer
-                                                   ├─ Fetch dst-wrapped DEK from dst SR
-                                                   ├─ Unwrap using dst KEK (local KMS call)
-                                                   └─ Decrypt field — no cross-cloud KMS needed
+   └─ Publish record ──────────────────────────────────→ dst Kafka topic  (cluster linking)
+                                                               │
+                                                          Consumer
+                                                               ├─ Fetch -dst subject from dst SR
+                                                               ├─ Unwrap using GCP Cloud KMS
+                                                               └─ Decrypt field — no cross-cloud KMS needed
 ```
 
 ---
@@ -219,9 +241,10 @@ is no background re-keying service.
 
 ### Decision 2: DEK wrapped in memory, not re-wrapped at the destination
 
-**Decision:** The dst-wrapped DEK is produced by the source producer (in memory) and shipped
-to the dst Schema Registry via schema linking. The dst never re-wraps anything — it only
-unwraps using its own KEK.
+**Decision:** The dst-wrapped DEK is produced by the source producer (in memory) and persisted
+to the source Schema Registry under a `-dst` subject. The schema exporter replicates it to
+the dst Schema Registry automatically. The dst never re-wraps anything — it only unwraps
+using its own KEK.
 
 **Alternative considered:** Have the dst cluster receive the src-wrapped DEK and call the
 src KMS to unwrap it, then re-wrap with the dst KEK locally.

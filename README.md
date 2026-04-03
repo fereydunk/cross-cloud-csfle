@@ -135,14 +135,35 @@ export AWS_SECRET_ACCESS_KEY=...
 export AWS_REGION=us-east-2
 export GOOGLE_APPLICATION_CREDENTIALS=~/.config/gcloud/application_default_credentials.json
 
+JAR=target/cross-cloud-csfle-0.1.0-SNAPSHOT.jar
+PROPS=deployment/deployment.properties
+
 # 1. Provision DEKs (one-time — idempotent on reruns)
-java -jar target/cross-cloud-csfle-0.1.0-SNAPSHOT.jar provision deployment/deployment.properties
+java -jar $JAR provision $PROPS
 
 # 2. Produce 10 CSFLE-encrypted records to the source cluster
-java -jar target/cross-cloud-csfle-0.1.0-SNAPSHOT.jar producer deployment/deployment.properties
+java -jar $JAR producer $PROPS
 
-# 3. Consume and decrypt from the GCP mirror topic
-java -jar target/cross-cloud-csfle-0.1.0-SNAPSHOT.jar consumer deployment/deployment.properties
+# 3. Consume and decrypt from the GCP mirror topic (destination, GCP KMS)
+java -jar $JAR consumer $PROPS
+```
+
+### KMS boundary verification
+
+Four modes explicitly prove the KMS access boundary:
+
+```bash
+# Positive: AWS cluster + AWS KMS → decrypts successfully
+java -jar $JAR source-consumer $PROPS
+
+# Negative: AWS cluster + GCP KMS → fails (GCP cannot decrypt AWS ciphertext)
+java -jar $JAR source-consumer-gcp-attempt $PROPS
+
+# Positive: GCP cluster + GCP KMS → decrypts successfully  (same as 'consumer')
+java -jar $JAR consumer $PROPS
+
+# Negative: GCP cluster + AWS KMS → fails (AWS cannot decrypt GCP ciphertext)
+java -jar $JAR destination-consumer-aws-attempt $PROPS
 ```
 
 ### Run (Docker Compose)
@@ -170,15 +191,18 @@ cross-cloud-csfle/
 ├── docs/
 │   └── design.md                        # Full design decisions and trade-off record
 ├── Dockerfile                           # Multi-stage Maven + JRE build
-├── docker-compose.yml                   # provisioner / producer / consumer services
+├── docker-compose.yml                   # provisioner / producer / consumer / test services
 ├── src/
 │   ├── main/java/io/confluent/csfle/crosscloud/
-│   │   ├── Main.java                    # Dispatcher: provision | producer | consumer
+│   │   ├── Main.java                    # Dispatcher: all run modes
 │   │   ├── CrossCloudCsfleEngine.java   # Entry point — provisions DEKs for all rules
 │   │   ├── CrossCloudCsfleRunner.java   # CLI runner for provision mode
 │   │   ├── app/
-│   │   │   ├── CrossCloudProducer.java  # AWS-side: provision + encrypt + produce
-│   │   │   └── CrossCloudConsumer.java  # GCP-side: fetch dst DEK + decrypt + consume
+│   │   │   ├── CrossCloudProducer.java              # AWS: provision + encrypt + produce
+│   │   │   ├── CrossCloudConsumer.java              # GCP: fetch dst DEK + decrypt + consume
+│   │   │   ├── SourceConsumer.java                  # AWS cluster + AWS KMS (positive test)
+│   │   │   ├── SourceConsumerGcpAttempt.java        # AWS cluster + GCP KMS (negative test)
+│   │   │   └── DestinationConsumerAwsAttempt.java   # GCP cluster + AWS KMS (negative test)
 │   │   ├── config/
 │   │   │   ├── EncryptionRule.java      # One rule = one field + src KEK + dst KEK
 │   │   │   ├── KekReference.java        # KEK id + optional explicit type
@@ -215,7 +239,7 @@ cross-cloud-csfle/
 
 **No new components.** The solution runs entirely within the existing producer/provisioner. No sidecar, no key proxy, no re-keying service.
 
-**Both DEK copies stored at source SR.** The src-wrapped and dst-wrapped DEKs are both written to the source Schema Registry (the destination SR is in `IMPORT` mode — controlled by the schema exporter). The schema exporter replicates both subjects to the destination SR automatically.
+**Both DEK copies stored at source SR.** The src-wrapped and dst-wrapped DEKs are both written to the source Schema Registry under separate subjects (`cross-cloud-dek-{field}-src` and `cross-cloud-dek-{field}-dst`). The destination SR is in `IMPORT` mode (controlled by the schema exporter) and rejects direct writes. The schema exporter replicates both subjects to the destination SR automatically.
 
 **DEK plaintext never leaves JVM heap.** The plaintext DEK exists in memory only for the duration of the two `wrapDek()` calls and is explicitly zeroed in a `finally` block immediately after.
 

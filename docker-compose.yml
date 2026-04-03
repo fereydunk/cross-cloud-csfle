@@ -7,10 +7,15 @@
 #      (For local dev: gcloud auth application-default login and point to ~/.config/gcloud/application_default_credentials.json)
 #   3. Set AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY (and optionally AWS_SESSION_TOKEN).
 #
-# Run order:
+# Normal run order:
 #   docker compose run provisioner   # one-time DEK setup
 #   docker compose run producer      # produce 10 CSFLE-encrypted records
 #   docker compose run consumer      # decrypt from GCP mirror topic
+#
+# KMS boundary verification:
+#   docker compose run source-consumer                  # AWS cluster + AWS KMS → succeeds
+#   docker compose run source-consumer-gcp-attempt      # AWS cluster + GCP KMS → fails (expected)
+#   docker compose run destination-consumer-aws-attempt # GCP cluster + AWS KMS → fails (expected)
 
 x-aws-env: &aws-env
   AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
@@ -46,4 +51,25 @@ services:
     command: ["consumer", "/config/deployment.properties"]
     environment:
       <<: *gcp-env
+    volumes: *shared-vols
+
+  source-consumer:
+    build: .
+    command: ["source-consumer", "/config/deployment.properties"]
+    environment:
+      <<: *aws-env
+    volumes: *shared-vols
+
+  source-consumer-gcp-attempt:
+    build: .
+    command: ["source-consumer-gcp-attempt", "/config/deployment.properties"]
+    environment:
+      <<: *gcp-env
+    volumes: *shared-vols
+
+  destination-consumer-aws-attempt:
+    build: .
+    command: ["destination-consumer-aws-attempt", "/config/deployment.properties"]
+    environment:
+      <<: *aws-env
     volumes: *shared-vols

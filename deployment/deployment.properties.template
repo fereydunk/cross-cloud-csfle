@@ -47,6 +47,9 @@ topic=<your-topic>
 # rule.ssn.dst.kek.id=https://ciphertrust.example.com/api/v1/vault/keys/my-key
 # rule.ssn.dst.kek.type=CIPHERTRUST
 
-rule.ssn.field=ssn
+# Rule prefix (e.g. "ssn") is an arbitrary label — it groups the properties for one field.
+# The field value must match the exact JSON field name in your records.
+# DEK subjects are named: cross-cloud-dek-{field}-src and cross-cloud-dek-{field}-dst
+rule.ssn.field=<json-field-name>
 rule.ssn.src.kek.id=<src-kek-id>
 rule.ssn.dst.kek.id=<dst-kek-id>
