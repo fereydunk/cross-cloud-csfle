@@ -374,6 +374,57 @@ public class ConfluentSchemaRegistryClient implements SrcSchemaRegistryClient, D
         }
     }
 
+    /**
+     * Sets the mode for a single subject (e.g. "READWRITE" or "IMPORT").
+     * Subject-level mode overrides the global mode for that subject only,
+     * so the schema exporter continues running without disruption.
+     */
+    public void setSubjectMode(String subject, String mode) {
+        String body = "{\"mode\":\"" + mode + "\"}";
+        HttpRequest req = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/mode/" + subject))
+                .header("Content-Type", "application/vnd.schemaregistry.v1+json")
+                .header("Authorization", authHeader)
+                .PUT(HttpRequest.BodyPublishers.ofString(body))
+                .build();
+        try {
+            HttpResponse<String> resp = httpClient.send(req, HttpResponse.BodyHandlers.ofString());
+            if (resp.statusCode() != 200) {
+                throw new RuntimeException(
+                        "setSubjectMode(" + subject + ", " + mode + ") failed [" +
+                        resp.statusCode() + "]: " + resp.body());
+            }
+            log.info("Subject '{}' mode set to {} @ {}", subject, mode, baseUrl);
+        } catch (IOException | InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("setSubjectMode request failed", e);
+        }
+    }
+
+    /**
+     * Deletes the subject-level mode override, reverting to the global SR mode.
+     */
+    public void deleteSubjectMode(String subject) {
+        HttpRequest req = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/mode/" + subject))
+                .header("Authorization", authHeader)
+                .DELETE()
+                .build();
+        try {
+            HttpResponse<String> resp = httpClient.send(req, HttpResponse.BodyHandlers.ofString());
+            // 200 = deleted, 404 = no override existed — both are fine
+            if (resp.statusCode() != 200 && resp.statusCode() != 404) {
+                throw new RuntimeException(
+                        "deleteSubjectMode(" + subject + ") failed [" +
+                        resp.statusCode() + "]: " + resp.body());
+            }
+            log.info("Subject '{}' mode override cleared @ {}", subject, baseUrl);
+        } catch (IOException | InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("deleteSubjectMode request failed", e);
+        }
+    }
+
     // ── JSON array parsing (without external JSON dependency) ───────────────
 
     private List<String> parseJsonStringArray(String json) {

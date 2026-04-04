@@ -32,9 +32,9 @@ import java.util.Properties;
  *   java -jar cross-cloud-csfle.jar provision-dst deployment/deployment.properties
  * </pre>
  *
- * <p>The destination SR is briefly switched to READWRITE to allow the dst-wrapped DEK
- * subject to be written (the SR is normally in IMPORT mode while the schema exporter runs).
- * The original mode is restored immediately after, whether or not the operation succeeds.
+ * <p>Uses subject-level mode overrides (PUT /mode/{subject}) rather than the global SR mode,
+ * so the schema exporter continues running without interruption. Each dst-wrapped DEK subject
+ * is individually switched to READWRITE, written, then reverted to the global mode.
  */
 public class SplitProvisionDstApp {
 
@@ -63,20 +63,11 @@ public class SplitProvisionDstApp {
                 props.getProperty("dst.sr.api.secret"));
 
         List<EncryptionRule> rules = CrossCloudCsfleRunner.buildRules(props);
-        log.info("Processing {} rule(s)...", rules.size());
+        log.info("Processing {} rule(s) using subject-level mode overrides...", rules.size());
+        log.info("Global dst SR mode is unchanged — schema exporter continues running.");
 
-        String originalMode = dstSr.getMode();
-        log.info("Destination SR current mode: {} — switching to READWRITE for dst subject writes",
-                originalMode);
-        dstSr.setMode("READWRITE");
-
-        try {
-            for (EncryptionRule rule : rules) {
-                provisionDst(rule, dstSr);
-            }
-        } finally {
-            log.info("Restoring destination SR mode to {}", originalMode);
-            dstSr.setMode(originalMode);
+        for (EncryptionRule rule : rules) {
+            provisionDst(rule, dstSr);
         }
 
         log.info("");
@@ -87,8 +78,9 @@ public class SplitProvisionDstApp {
 
     private static void provisionDst(EncryptionRule rule, ConfluentSchemaRegistryClient dstSr) {
         String field = rule.getField();
-        log.info("Field '{}': reading transfer subject from dst SR...", field);
+        String dstSubject = "cross-cloud-dek-" + field + "-dst";
 
+        log.info("Field '{}': reading transfer subject from dst SR...", field);
         byte[] plaintextDek = dstSr.readTransferSubject(field);
         try {
             log.info("Field '{}': wrapping with dst KEK '{}'...",
@@ -102,8 +94,17 @@ public class SplitProvisionDstApp {
                         "Failed to wrap DEK with dst KEK for field '" + field + "'", e);
             }
 
-            dstSr.storeDekForRole(field, rule.getDstKek().getId(), wrappedDek, "dst");
-            log.info("Field '{}': dst-wrapped DEK stored in dst SR ✓", field);
+            // Use subject-level mode override so the global SR mode (IMPORT) is unchanged
+            // and the schema exporter continues running without interruption.
+            log.info("Field '{}': setting subject '{}' to READWRITE for write...", field, dstSubject);
+            dstSr.setSubjectMode(dstSubject, "READWRITE");
+            try {
+                dstSr.storeDekForRole(field, rule.getDstKek().getId(), wrappedDek, "dst");
+                log.info("Field '{}': dst-wrapped DEK stored in dst SR ✓", field);
+            } finally {
+                dstSr.deleteSubjectMode(dstSubject);
+                log.info("Field '{}': subject '{}' mode override cleared ✓", field, dstSubject);
+            }
 
             dstSr.deleteTransferSubject(field);
             log.info("Field '{}': transfer subject deleted ✓", field);
