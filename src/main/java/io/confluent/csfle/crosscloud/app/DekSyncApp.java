@@ -1,5 +1,7 @@
 package io.confluent.csfle.crosscloud.app;
 
+import io.confluent.csfle.crosscloud.CrossCloudCsfleRunner;
+import io.confluent.csfle.crosscloud.config.EncryptionRule;
 import io.confluent.csfle.crosscloud.config.KekReference;
 import io.confluent.csfle.crosscloud.dek.DekFetcher;
 import io.confluent.csfle.crosscloud.dek.DekSyncer;
@@ -10,6 +12,7 @@ import org.slf4j.LoggerFactory;
 
 import java.io.FileInputStream;
 import java.io.IOException;
+import java.util.List;
 import java.util.Properties;
 
 /**
@@ -24,19 +27,19 @@ import java.util.Properties;
  *   java -jar cross-cloud-csfle.jar sync deployment/deployment.properties
  * </pre>
  *
- * <p>The direction is inferred automatically:
+ * <p>The direction is inferred automatically from {@code sync.surviving.role}:
  * <ul>
- *   <li>If only the dst SR (GCP) is reachable → surviving=dst, recovering=src (AWS)</li>
- *   <li>If only the src SR (AWS) is reachable → surviving=src, recovering=dst (GCP)</li>
+ *   <li>{@code dst} (default): GCP side survived. DekSyncer re-wraps GCP-era DEKs with
+ *       the src KEK and pushes them to the recovering src SR before the link re-establishes.</li>
+ *   <li>{@code src}: AWS side survived. DekSyncer re-wraps AWS-era DEKs with the dst KEK
+ *       and pushes them to the recovering dst SR.</li>
  * </ul>
- * Provide the {@code sync.surviving.role} property to override (default: "dst").
  *
  * <p>Properties used (all already present in deployment.properties):
  * <ul>
  *   <li>{@code src.sr.url}, {@code src.sr.api.key}, {@code src.sr.api.secret}</li>
  *   <li>{@code dst.sr.url}, {@code dst.sr.api.key}, {@code dst.sr.api.secret}</li>
- *   <li>{@code rule.ssn.src.kek.id} — AWS KEK for re-wrapping</li>
- *   <li>{@code rule.ssn.dst.kek.id} — GCP KEK for re-wrapping</li>
+ *   <li>One or more {@code rule.*} blocks (KEKs read via standard buildRules)</li>
  *   <li>{@code sync.surviving.role} — "dst" (default) or "src"</li>
  * </ul>
  */
@@ -63,10 +66,20 @@ public class DekSyncApp {
         log.info("This sync MUST complete before the cluster link is re-established.");
         log.info("The recovering SR will be briefly switched to READWRITE during sync.");
 
+        // Resolve the recovering KEK from the first encryption rule.
+        // All rules are expected to share the same recovering-side KMS in a typical deployment.
+        List<EncryptionRule> rules = CrossCloudCsfleRunner.buildRules(cfg);
+        if (rules.isEmpty()) {
+            log.error("No encryption rules found in deployment.properties — cannot determine recovering KEK.");
+            System.exit(1);
+        }
+        KekReference recoveringKek = survivingRole.equals("dst")
+                ? rules.get(0).getSrcKek()   // GCP survived → recovering is AWS → use src KEK
+                : rules.get(0).getDstKek();   // AWS survived → recovering is GCP → use dst KEK
+
         // Build clients
         DekFetcher survivingFetcher;
         ConfluentSchemaRegistryClient recoveringSr;
-        KekReference recoveringKek;
 
         if (survivingRole.equals("dst")) {
             // GCP survived, AWS recovering
@@ -78,7 +91,6 @@ public class DekSyncApp {
                     cfg.getProperty("src.sr.url"),
                     cfg.getProperty("src.sr.api.key"),
                     cfg.getProperty("src.sr.api.secret"));
-            recoveringKek = new KekReference(cfg.getProperty("rule.ssn.src.kek.id"));
         } else {
             // AWS survived, GCP recovering
             survivingFetcher = new DekFetcher(
@@ -89,7 +101,6 @@ public class DekSyncApp {
                     cfg.getProperty("dst.sr.url"),
                     cfg.getProperty("dst.sr.api.key"),
                     cfg.getProperty("dst.sr.api.secret"));
-            recoveringKek = new KekReference(cfg.getProperty("rule.ssn.dst.kek.id"));
         }
 
         DekSyncer syncer = new DekSyncer(
@@ -102,12 +113,12 @@ public class DekSyncApp {
         log.info("");
 
         if (report.isComplete()) {
-            log.info("✓ Sync successful. All DEK versions are present on both sides.");
-            log.info("  You may now re-establish the cluster link.");
+            log.info("[OK] Sync successful. All DEK versions are present on both sides.");
+            log.info("     You may now re-establish the cluster link.");
         } else {
-            log.error("✗ Sync completed with {} error(s). DO NOT re-establish the cluster link.",
+            log.error("[FAIL] Sync completed with {} error(s). DO NOT re-establish the cluster link.",
                     report.errors().size());
-            log.error("  Fix the errors above and re-run the sync.");
+            log.error("       Fix the errors above and re-run the sync.");
             System.exit(1);
         }
     }

@@ -30,7 +30,7 @@ public class Main {
 
     public static void main(String[] args) throws Exception {
         if (args.length == 0) {
-            System.err.println("Usage: java -jar cross-cloud-csfle.jar [provision|producer|consumer] <deployment.properties>");
+            System.err.println("Usage: java -jar cross-cloud-csfle.jar [provision|provision-dst|producer|consumer|sync|source-consumer|source-consumer-gcp-attempt|destination-consumer-aws-attempt] <deployment.properties>");
             System.exit(1);
         }
 

@@ -86,8 +86,8 @@ public class DekSyncer {
      *         proceeding to topic promotion.
      */
     public SyncReport sync() {
-        log.info("=== DEK Sync: {} (surviving, role={}) → {} (recovering, role={})",
-                "survivingSR", survivingRole, "recoveringSR", recoveringRole);
+        log.info("=== DEK Sync: {} (surviving) → {} (recovering)",
+                survivingRole, recoveringRole);
 
         String originalMode = recoveringSr.getMode();
         log.info("Recovering SR current mode: {} — switching to READWRITE for sync", originalMode);

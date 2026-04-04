@@ -15,9 +15,10 @@
 #   docker compose run dek-sync           # pre-failback DEK sync (re-wrap GCP-era DEKs with AWS KMS)
 #
 # KMS boundary verification (see docs/test-cases.md for full spec and run results):
-#   docker compose run source-consumer                  # AWS cluster + AWS KMS → succeeds
-#   docker compose run source-consumer-gcp-attempt      # AWS cluster + GCP KMS → fails (expected)
-#   docker compose run destination-consumer-aws-attempt # GCP cluster + AWS KMS → fails (expected)
+#   docker compose run source-consumer                  # TC-01: AWS cluster + AWS KMS → succeeds
+#   docker compose run source-consumer-gcp-attempt      # TC-02: AWS cluster + GCP KMS → fails (expected)
+#   docker compose run consumer                         # TC-03: GCP cluster + GCP KMS → succeeds
+#   docker compose run destination-consumer-aws-attempt # TC-04: GCP cluster + AWS KMS → fails (expected)
 
 x-aws-env: &aws-env
   AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}

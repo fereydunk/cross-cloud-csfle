@@ -100,14 +100,14 @@ public class SplitProvisionDstApp {
             dstSr.setSubjectMode(dstSubject, "READWRITE");
             try {
                 dstSr.storeDekForRole(field, rule.getDstKek().getId(), wrappedDek, "dst");
-                log.info("Field '{}': dst-wrapped DEK stored in dst SR ✓", field);
+                log.info("Field '{}': dst-wrapped DEK stored in dst SR [OK]", field);
             } finally {
                 dstSr.deleteSubjectMode(dstSubject);
-                log.info("Field '{}': subject '{}' mode override cleared ✓", field, dstSubject);
+                log.info("Field '{}': subject '{}' mode override cleared [OK]", field, dstSubject);
             }
 
             dstSr.deleteTransferSubject(field);
-            log.info("Field '{}': transfer subject deleted ✓", field);
+            log.info("Field '{}': transfer subject deleted [OK]", field);
 
         } finally {
             Arrays.fill(plaintextDek, (byte) 0);

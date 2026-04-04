@@ -91,6 +91,8 @@ public class ConfluentSchemaRegistryClient implements SrcSchemaRegistryClient, D
 
     private void storeDekViaRegistry(String field, String kekName, byte[] encryptedDek) {
         String subject = field + "-value";
+        // version:1 associates this DEK with schema version 1. For DEK rotation across
+        // multiple schema versions, increment the version to match the target schema version.
         String body = """
                 {"subject":"%s","version":1,"algorithm":"AES256_GCM","encryptedKeyMaterial":"%s"}
                 """.formatted(subject, Base64.getEncoder().encodeToString(encryptedDek)).strip();

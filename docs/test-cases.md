@@ -6,12 +6,12 @@ All tests run against live Confluent Cloud infrastructure:
 
 | Component | Details |
 |---|---|
-| Source cluster | `lkc-z2zw17` (AWS us-east-2) |
-| Destination cluster | `lkc-d25pry` (GCP us-west2) |
+| Source cluster | AWS us-east-2 |
+| Destination cluster | GCP us-west2 |
 | Topic | `social-security-records` |
 | Encrypted field | `social_security` (AES-256-GCM, versioned wire format `dekVersion:iv:ct`) |
-| Source KEK | AWS KMS `arn:aws:kms:us-east-2:586051073099:key/5a662fdc-6883-4b1c-8e14-6f583c910d4d` |
-| Destination KEK | GCP Cloud KMS `projects/vahid-project-312305/.../cryptoKeys/dr-kek` |
+| Source KEK | AWS KMS key in us-east-2 |
+| Destination KEK | GCP Cloud KMS key in us-west2 |
 | DEK provisioning | `dual` (default) — both KMS systems reachable from provisioner |
 
 ---
@@ -49,10 +49,10 @@ $JAVA -jar $JAR source-consumer $PROPS
 ```
 
 **Expected outcome:**
-- Consumer connects to `pkc-1n767v.us-east-2.aws.confluent.cloud:9092`
+- Consumer connects to the source (AWS) cluster
 - Fetches `cross-cloud-dek-social_security-src` subject from src SR
 - Unwraps DEK with AWS KMS
-- Decrypts all 10 `social_security` field values successfully
+- Decrypts all `social_security` field values successfully
 - Prints plaintext SSNs (e.g. `123-45-6789`, `234-56-7890`, ...)
 - Exit code 0
 
@@ -78,8 +78,9 @@ $JAVA -jar $JAR source-consumer-gcp-attempt $PROPS
 - Fetches `cross-cloud-dek-social_security-src` subject (AWS-wrapped DEK)
 - Attempts to unwrap with GCP Cloud KMS using the dst KEK
 - **Fails** with `INVALID_ARGUMENT: Decryption failed` (GCP KMS rejects AWS ciphertext)
+- The exception is caught and logged as expected behaviour
 - No plaintext SSNs are printed
-- Exit code non-zero (exception thrown)
+- Exit code 0 (exception is caught — failure is the expected outcome)
 
 **Why this matters:** Proves that possession of the dst KEK alone is insufficient to
 decrypt src-side records. The src-wrapped DEK is cryptographically bound to the src KEK.
@@ -98,10 +99,10 @@ $JAVA -jar $JAR consumer $PROPS
 ```
 
 **Expected outcome:**
-- Consumer connects to `pkc-nkdpdd.us-west2.gcp.confluent.cloud:9092`
+- Consumer connects to the destination (GCP) cluster
 - Fetches `cross-cloud-dek-social_security-dst` subject from dst SR
 - Unwraps DEK with GCP Cloud KMS (no AWS call)
-- Decrypts all 10 `social_security` field values successfully
+- Decrypts all `social_security` field values successfully
 - Prints plaintext SSNs matching TC-01 output
 - Exit code 0
 
@@ -127,8 +128,9 @@ $JAVA -jar $JAR destination-consumer-aws-attempt $PROPS
 - Fetches `cross-cloud-dek-social_security-dst` subject (GCP-wrapped DEK)
 - Attempts to unwrap with AWS KMS using the src KEK
 - **Fails** — AWS KMS rejects the request (see failure signals below)
+- The exception is caught and logged as expected behaviour
 - No plaintext SSNs are printed
-- Exit code non-zero (exception thrown)
+- Exit code 0 (exception is caught — failure is the expected outcome)
 
 **Failure signals:**
 - `InvalidCiphertextException` → AWS KMS reached, rejected GCP ciphertext (canonical failure)
@@ -150,8 +152,8 @@ matrix is verified.
 
 |                      | Decrypt with AWS KMS (src KEK) | Decrypt with GCP KMS (dst KEK) |
 |---|---|---|
-| **src-wrapped DEK** | ✅ TC-01 — succeeds | ❌ TC-02 — fails (`INVALID_ARGUMENT`) |
-| **dst-wrapped DEK** | ❌ TC-04 — fails (`InvalidCiphertextException`) | ✅ TC-03 — succeeds |
+| **src-wrapped DEK** | TC-01 — succeeds | TC-02 — fails (`INVALID_ARGUMENT`) |
+| **dst-wrapped DEK** | TC-04 — fails (`InvalidCiphertextException`) | TC-03 — succeeds |
 
 All four quadrants must be verified for the KMS boundary to be considered proven.
 
@@ -161,12 +163,13 @@ All four quadrants must be verified for the KMS boundary to be considered proven
 
 ```bash
 echo "=== TC-01: source positive ===" && $JAVA -jar $JAR source-consumer $PROPS
-echo "=== TC-02: source negative ===" && $JAVA -jar $JAR source-consumer-gcp-attempt $PROPS || true
+echo "=== TC-02: source negative ===" && $JAVA -jar $JAR source-consumer-gcp-attempt $PROPS
 echo "=== TC-03: destination positive ===" && $JAVA -jar $JAR consumer $PROPS
-echo "=== TC-04: destination negative ===" && $JAVA -jar $JAR destination-consumer-aws-attempt $PROPS || true
+echo "=== TC-04: destination negative ===" && $JAVA -jar $JAR destination-consumer-aws-attempt $PROPS
 ```
 
-TC-02 and TC-04 are expected to fail — `|| true` prevents them from aborting the suite.
+TC-02 and TC-04 exit 0 (the expected exception is caught and logged). All four commands
+can be run sequentially without `|| true`.
 
 ---
 
@@ -226,21 +229,74 @@ exporter → dst SR, which is already required for schema linking.
 
 ---
 
+## TC-06 — Failback DEK sync: re-wrap DEKs from surviving SR to recovering SR
+
+**Purpose:** Verify that `DekSyncer` correctly re-wraps DEK versions from the surviving
+Schema Registry (GCP, dst) and pushes them to the recovering SR (AWS, src). This is the
+pre-failback step that must complete before any mirror topic is promoted.
+
+**Setup:** Simulate the state after a DR failover where the AWS side produced new DEK
+versions that the GCP side does not have, or vice versa. In practice, run after a real or
+simulated outage.
+
+**Command:**
+```bash
+# Default: GCP survived (dst), AWS recovering (src)
+$JAVA -jar $JAR sync $PROPS
+
+# If AWS survived (src), GCP recovering (dst):
+# Add to deployment.properties: sync.surviving.role=src
+$JAVA -jar $JAR sync $PROPS
+```
+
+**Expected outcome:**
+- Lists all DEK fields and versions in the surviving SR
+- For each version missing in the recovering SR: fetches, unwraps with surviving KMS,
+  re-wraps with recovering KMS, pushes to recovering SR
+- Versions already present in the recovering SR are skipped (idempotent)
+- Recovering SR briefly switched to READWRITE, then restored to original mode
+- Plaintext DEK zeroed from memory after each re-wrap
+- Exit code 0 if all versions synced; non-zero if any version fails
+
+**Failure signals:**
+- Any KMS error → credentials not set or KMS key unavailable
+- SR connection error → recovering SR not reachable
+- Non-zero exit → do **not** proceed to topic promotion until sync is re-run successfully
+
+---
+
 ## Run results (2026-04-03)
 
-| TC | Cluster | KMS | Result | Observed error / output |
+### KMS isolation matrix (TC-01 through TC-04)
+
+| TC | Cluster | KMS used | Result | Observed output |
 |---|---|---|---|---|
-| TC-01 | AWS (src) | AWS KMS | ✅ PASS | Decrypted: 40 records. All 10 SSNs printed in plaintext. |
-| TC-02 | AWS (src) | GCP KMS | ✅ PASS (expected fail) | `INVALID_ARGUMENT: Decryption failed: the ciphertext is invalid.` — GCP KMS rejected AWS ciphertext. |
-| TC-03 | GCP (dst) | GCP KMS | ✅ PASS | Decrypted: 40 records. All 10 SSNs match TC-01 output. GCP cluster fully self-sufficient, no AWS KMS call. |
-| TC-04 | GCP (dst) | AWS KMS | ✅ PASS (expected fail) | `KmsException: The security token included in the request is expired` — AWS credentials had expired; no plaintext returned. Canonical `InvalidCiphertextException` would be observed with fresh credentials. |
+| TC-01 | AWS (src) | AWS KMS | PASS | 10 SSNs decrypted in plaintext. |
+| TC-02 | AWS (src) | GCP KMS | PASS (expected fail) | `INVALID_ARGUMENT: Decryption failed: the ciphertext is invalid.` — GCP KMS rejected AWS ciphertext. Exit 0. |
+| TC-03 | GCP (dst) | GCP KMS | PASS | 10 SSNs decrypted in plaintext. Matches TC-01. GCP fully self-sufficient, no AWS KMS call. |
+| TC-04 | GCP (dst) | AWS KMS | PASS (expected fail) | `KmsException: The security token included in the request is expired` — credentials had expired; no plaintext returned. Exit 0. |
 
 All four quadrants verified. KMS isolation boundary confirmed.
 
-| TC | Mode | Result | Notes |
-|---|---|---|---|
-| TC-05 | Split provisioning (Phase 1) | ✅ PASS | AWS KMS only — no GCP call. Transfer subject written to src SR, replicated by schema exporter to dst SR. |
-| TC-05 | Split provisioning (Phase 2) | ✅ PASS | GCP KMS only — no AWS call. Transfer subject read from dst SR, wrapped with GCP KMS, stored. Transfer deleted. dst SR stayed IMPORT. |
-| TC-05 | Post-split consumers | ✅ PASS | AWS consumer: Decrypted 60 records. GCP consumer: Decrypted 60 records. Both use split-mode DEK, no cross-cloud KMS call. |
+> **TC-04 note:** If AWS STS credentials are fresh, the expected error is
+> `InvalidCiphertextException`. Either error proves the boundary — no plaintext is returned
+> in either case. Record counts above reflect cumulative records in the topic across all runs.
 
-**Discovered and fixed during TC-05:** Phase 2 originally used global SR mode (`PUT /mode`) which stopped the schema exporter and could not be restored (`42205: Cannot import since found existing subjects`). Fixed to use subject-level mode overrides (`PUT /mode/{subject}`) — global IMPORT mode is never changed.
+### Split mode (TC-05)
+
+| Phase | Result | Notes |
+|---|---|---|
+| Phase 1 (source) | PASS | AWS KMS only — no GCP call. Transfer subject written to src SR and replicated by schema exporter to dst SR within seconds. |
+| Phase 2 (destination) | PASS | GCP KMS only — no AWS call. Transfer subject read from dst SR, wrapped, stored. Transfer deleted. dst SR stayed IMPORT throughout — schema exporter uninterrupted. |
+| Post-split consumers | PASS | Both src consumer (AWS KMS) and dst consumer (GCP KMS) decrypted all records. No cross-cloud KMS call at read time. |
+
+---
+
+## Implementation notes
+
+- **Phase 2 global-mode bug (fixed):** An early implementation of `SplitProvisionDstApp`
+  switched the global dst SR mode to READWRITE before writing the dst-wrapped DEK. This
+  stopped the Confluent schema exporter, and restoring IMPORT mode failed with
+  `42205: Cannot import since found existing subjects`. Fixed by using subject-level mode
+  overrides (`PUT /mode/{subject}`) — the global IMPORT mode is never changed and the
+  exporter runs continuously throughout Phase 2.

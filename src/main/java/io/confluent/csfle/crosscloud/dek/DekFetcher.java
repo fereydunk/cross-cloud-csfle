@@ -134,9 +134,10 @@ public class DekFetcher {
 
     /**
      * Fetches the wrapped (encrypted) DEK bytes for a specific version without unwrapping.
-     * Used by {@link DekSyncer} to obtain ciphertext for re-wrapping with another KMS.
+     * Returns the raw ciphertext — the caller is responsible for using the correct KMS to unwrap.
      *
-     * To get the plaintext DEK for re-wrapping, use {@link #fetchDek(String, String, int)} instead.
+     * To obtain plaintext DEK bytes (e.g. for re-wrapping), use {@link #fetchDek(String, String, int)}
+     * which handles unwrapping via the KMS client automatically.
      */
     public byte[] fetchWrappedDekBytes(String field, String role, int version) {
         String responseJson = fetchSubjectAtVersion(subjectName(field, role),
