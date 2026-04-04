@@ -381,12 +381,12 @@ Phase 1 — source side (java -jar ... provision deployment.properties):
   5. Zero plaintext DEK
 
 Phase 2 — destination side (java -jar ... provision-dst deployment.properties):
-  1. Switch dst SR to READWRITE temporarily
-  2. Read transfer subject from dst SR → decode plaintext DEK
-  3. Wrap with dst KEK → store as dst subject in dst SR
-  4. Delete transfer subject from dst SR
-  5. Restore dst SR to original mode
-  6. Zero plaintext DEK
+  1. Read transfer subject from dst SR → decode plaintext DEK
+  2. Wrap with dst KEK → store as dst subject in dst SR
+     (uses subject-level mode override PUT /mode/{subject} = READWRITE,
+      then clears it — global IMPORT mode is never changed, exporter runs continuously)
+  3. Delete transfer subject from dst SR
+  4. Zero plaintext DEK
 ```
 
 The transfer subject (`cross-cloud-dek-{field}-transfer`) is protected in transit by schema

@@ -170,6 +170,62 @@ TC-02 and TC-04 are expected to fail — `|| true` prevents them from aborting t
 
 ---
 
+## TC-05 — Split mode: source cannot reach destination KMS
+
+**Purpose:** Verify the two-phase provisioning path for deployments where the source-side
+provisioner has no network access to the destination KMS. Phase 1 wraps with the src KEK
+only and writes the plaintext DEK to a temporary transfer subject in the src SR. Schema
+linking replicates the transfer subject to the dst SR. Phase 2 reads the transfer subject
+from the dst SR and wraps with the dst KEK — no AWS call is made in Phase 2.
+
+**Setup:**
+```bash
+# Add to deployment.properties:
+dek.provisioning.mode=split
+```
+
+**Commands:**
+```bash
+# Phase 1 — source side (AWS KMS only, no GCP call)
+$JAVA -jar $JAR provision $PROPS
+
+# Wait for schema linking to replicate transfer subject to dst SR (typically < 30s)
+# Verify: curl -u <key:secret> <dst-sr-url>/subjects/cross-cloud-dek-social_security-transfer/versions
+
+# Phase 2 — destination side (GCP KMS only, no AWS call)
+$JAVA -jar $JAR provision-dst $PROPS
+```
+
+**Expected outcome (Phase 1):**
+- Wraps DEK with AWS KMS → persists `cross-cloud-dek-social_security-src` subject in src SR
+- Writes plaintext DEK (base64) as `cross-cloud-dek-social_security-transfer` in src SR
+- **No GCP KMS call is made**
+- Status: `PHASE 1 COMPLETE — run 'provision-dst' on destination side to finish`
+- Exit code 0
+
+**Expected outcome (Phase 2):**
+- Reads transfer subject from dst SR (replicated by schema exporter)
+- Wraps plaintext DEK with GCP Cloud KMS
+- Sets `cross-cloud-dek-social_security-dst` subject mode to READWRITE (subject-level, not global)
+- Persists GCP-wrapped DEK to dst SR
+- Clears subject-level mode override — dst SR global mode remains IMPORT, schema exporter uninterrupted
+- Deletes transfer subject
+- **No AWS KMS call is made**
+- Exit code 0
+
+**Post-provisioning verification:**
+```bash
+$JAVA -jar $JAR producer $PROPS        # produce records with split-mode DEK
+$JAVA -jar $JAR source-consumer $PROPS # AWS cluster + AWS KMS → decrypts
+$JAVA -jar $JAR consumer $PROPS        # GCP cluster + GCP KMS → decrypts (no AWS call)
+```
+
+**Why this matters:** Proves that cross-cloud DEK provisioning works even when the source
+host cannot reach the destination KMS — the only network path required is src SR → schema
+exporter → dst SR, which is already required for schema linking.
+
+---
+
 ## Run results (2026-04-03)
 
 | TC | Cluster | KMS | Result | Observed error / output |
@@ -180,3 +236,11 @@ TC-02 and TC-04 are expected to fail — `|| true` prevents them from aborting t
 | TC-04 | GCP (dst) | AWS KMS | ✅ PASS (expected fail) | `KmsException: The security token included in the request is expired` — AWS credentials had expired; no plaintext returned. Canonical `InvalidCiphertextException` would be observed with fresh credentials. |
 
 All four quadrants verified. KMS isolation boundary confirmed.
+
+| TC | Mode | Result | Notes |
+|---|---|---|---|
+| TC-05 | Split provisioning (Phase 1) | ✅ PASS | AWS KMS only — no GCP call. Transfer subject written to src SR, replicated by schema exporter to dst SR. |
+| TC-05 | Split provisioning (Phase 2) | ✅ PASS | GCP KMS only — no AWS call. Transfer subject read from dst SR, wrapped with GCP KMS, stored. Transfer deleted. dst SR stayed IMPORT. |
+| TC-05 | Post-split consumers | ✅ PASS | AWS consumer: Decrypted 60 records. GCP consumer: Decrypted 60 records. Both use split-mode DEK, no cross-cloud KMS call. |
+
+**Discovered and fixed during TC-05:** Phase 2 originally used global SR mode (`PUT /mode`) which stopped the schema exporter and could not be restored (`42205: Cannot import since found existing subjects`). Fixed to use subject-level mode overrides (`PUT /mode/{subject}`) — global IMPORT mode is never changed.
