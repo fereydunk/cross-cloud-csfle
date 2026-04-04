@@ -138,23 +138,25 @@ export GOOGLE_APPLICATION_CREDENTIALS=~/.config/gcloud/application_default_crede
 JAR=target/cross-cloud-csfle-0.1.0-SNAPSHOT.jar
 PROPS=deployment/deployment.properties
 
-# 1. Provision DEKs — dual mode (default: both KMS systems reachable)
+# 1. Provision DEKs — dual mode (default: both KMS systems reachable from provisioner)
 java -jar $JAR provision $PROPS
 
-# 1b. Split mode — when source cannot reach destination KMS
-#     Phase 1 (source side):
-java -jar $JAR provision $PROPS          # set dek.provisioning.mode=split in properties
-#     Wait for schema linking to replicate transfer subject to dst SR, then:
-#     Phase 2 (destination side):
+# 1b. Split mode — when source-side provisioner cannot reach destination KMS
+#     Add to deployment.properties: dek.provisioning.mode=split
+#     Phase 1 (source side — AWS KMS only, no GCP call):
+java -jar $JAR provision $PROPS
+#     Wait for schema linking to replicate the transfer subject to dst SR (typically <30s)
+#     Phase 2 (destination side — GCP KMS only, no AWS call):
 java -jar $JAR provision-dst $PROPS
 
 # 2. Produce 10 CSFLE-encrypted records to the source cluster
 java -jar $JAR producer $PROPS
 
-# 3. Consume and decrypt from the GCP mirror topic (destination, GCP KMS)
+# 3. Consume and decrypt from the GCP mirror topic (destination, GCP KMS, no AWS call)
 java -jar $JAR consumer $PROPS
 
-# 4. (Failback only) Sync DEKs after link re-establishment
+# 4. (Failback only) Re-wrap DEK versions from surviving SR and push to recovering SR
+#    Default: GCP survived (dst), AWS recovering (src). Override with sync.surviving.role=src.
 java -jar $JAR sync $PROPS
 ```
 
@@ -341,11 +343,11 @@ If DEK rotation is required while one KMS is unreachable, use `DekProvisioner.pr
 Run the DEK sync **before** promoting any mirror topics:
 
 ```bash
-# Default: GCP survived (dst), AWS is recovering (src)
+# GCP survived (dst), AWS recovering (src) — default, no extra config needed
 java -jar $JAR sync $PROPS
 
-# Override if AWS survived instead:
-# Add sync.surviving.role=src to deployment.properties, then:
+# AWS survived (src), GCP recovering (dst) — add to deployment.properties:
+# sync.surviving.role=src
 java -jar $JAR sync $PROPS
 ```
 

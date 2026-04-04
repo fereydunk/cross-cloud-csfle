@@ -380,14 +380,20 @@ natural window Confluent's API provides — we use it.
 ### Decision 5: DEK sync runs with AWS SR briefly in READWRITE mode
 
 **Decision:** During the DEK sync window (steps 8–11 of the runbook), AWS SR is switched
-to READWRITE so that DekSyncer can write the re-wrapped DEK subjects. It is switched back
-to IMPORT immediately after sync completes.
+to READWRITE (global mode) so that DekSyncer can write the re-wrapped DEK subjects. It is
+switched back to IMPORT immediately after sync completes.
 
 **Why:** The Schema Registry IMPORT mode rejects writes from normal clients. Switching to
 READWRITE for the sync window is safe because DekSyncer is the only writer during this
-window (mirror topics are paused, producers have not been redirected to AWS yet). The
-alternative — emulating the schema exporter wire protocol to write in IMPORT mode — is
-complex and fragile.
+window (mirror topics are paused, producers have not been redirected to AWS yet, and the
+reverse schema exporter is paused by the operator at step 12). The alternative — emulating
+the schema exporter wire protocol to write in IMPORT mode — is complex and fragile.
+
+**Note on global vs. subject-level mode:** `SplitProvisionDstApp` (split-mode Phase 2) uses
+subject-level mode overrides (`PUT /mode/{subject}`) instead of global mode, because the
+schema exporter is running continuously and must not be interrupted. `DekSyncer` uses global
+mode because it runs in a controlled window where no exporter is active on the recovering SR.
+These are two different contexts with different constraints.
 
 ---
 
@@ -402,7 +408,8 @@ complex and fragile.
 | `DekSyncApp` | New | ✅ Done | CLI entrypoint for `sync` mode; auto-detects surviving/recovering role |
 | `SyncReport` | New | ✅ Done | Completion gate — non-zero exit and error list on any failure |
 | `DekProvisioningMode` | New | ✅ Done | Enum: `DUAL` / `SPLIT`; single-KMS auto-detected |
-| `SplitProvisionDstApp` | New | ✅ Done | Phase 2 runner for split-mode provisioning |
+| `SplitProvisionDstApp` | New | ✅ Done | Phase 2 runner for split-mode provisioning; uses subject-level mode to avoid disrupting schema exporter |
+| `ConfluentSchemaRegistryClient` | Modify | ✅ Done | Added `setSubjectMode()` and `deleteSubjectMode()` for `PUT/DELETE /mode/{subject}` |
 | `Main` | Modify | ✅ Done | `sync` and `provision-dst` modes wired |
 | `FailbackRunner` | New | ⬜ Not started | Full Confluent REST API orchestration (link + exporter + DEK sync sequence) |
 
@@ -422,3 +429,4 @@ follow the runbook manually, running `java -jar ... sync $PROPS` for steps 8–1
 | Recovering SR already has a version (partial previous sync) | DekSyncer detects it present and skips; no duplicate writes |
 | Schema exporter catch-up incomplete when sync runs | Sync finds no GCP-era DEK subjects in AWS SR — detects mismatch, blocks promotion |
 | AWS SR stuck in READWRITE after sync crash | Next runbook run re-checks mode, sets IMPORT, continues from safe state |
+| AWS side survived instead of GCP | Set `sync.surviving.role=src` in deployment.properties; DekSyncer re-wraps in the correct direction |

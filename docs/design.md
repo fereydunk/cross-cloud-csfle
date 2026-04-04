@@ -393,6 +393,11 @@ The transfer subject (`cross-cloud-dek-{field}-transfer`) is protected in transi
 linking TLS and at rest by Schema Registry authentication. It exists only for the window
 between phase 1 and phase 2 — it is deleted as soon as phase 2 completes.
 
+**Phase 2 SR mode:** `provision-dst` uses subject-level mode overrides (`PUT /mode/{subject}`)
+rather than the global SR mode. The specific dst-wrapped DEK subject is briefly set to
+READWRITE, written, then reverted. The global SR mode (IMPORT) is never changed, so the
+schema exporter continues running without interruption throughout Phase 2.
+
 **Hard constraint relaxation:** split mode is the only situation where plaintext DEK material
 exists outside the provisioner JVM (stored temporarily in Schema Registry). This is an
 explicit trade-off accepted for deployments where dual-KMS access from a single host is not

@@ -49,6 +49,19 @@ topic=<your-topic>
 #
 # dek.provisioning.mode=dual
 
+# ── DEK Sync (failback only) ─────────────────────────────────────────────────
+# Used by the 'sync' run mode (DekSyncApp) during pre-failback DEK re-wrap.
+# Specifies which side survived the outage and holds the source-of-truth DEKs.
+#
+# dst (default): GCP side survived. DekSyncer re-wraps GCP-era DEKs with AWS KMS
+#   and pushes them to the recovering AWS SR before the link is re-established.
+#
+# src: AWS side survived. DekSyncer re-wraps AWS-era DEKs with GCP KMS
+#   and pushes them to the recovering GCP SR.
+#
+# Omit this property for the common case (GCP survived, AWS recovering).
+# sync.surviving.role=dst
+
 # ── Encryption Rules ──────────────────────────────────────────────────────────
 # One rule per sensitive field. Repeat this block for each field.
 
