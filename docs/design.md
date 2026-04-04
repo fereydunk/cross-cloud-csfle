@@ -410,3 +410,11 @@ possible. See constraint 3 in [Hard Constraints](#hard-constraints).
   on that side. Recovery requires re-provisioning with a new KEK.
 - **In-flight re-encryption:** Records already replicated to the dst with one DEK cannot be
   re-encrypted in place. Re-encryption requires producing new records.
+
+---
+
+## KMS Isolation Verification
+
+The four-quadrant KMS isolation matrix is verified by live test cases against the AWS→GCP
+PoC infrastructure. See [`docs/test-cases.md`](test-cases.md) for full test case
+specifications, commands, expected outcomes, and run results.

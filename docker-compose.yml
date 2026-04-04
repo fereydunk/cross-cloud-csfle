@@ -8,11 +8,13 @@
 #   3. Set AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY (and optionally AWS_SESSION_TOKEN).
 #
 # Normal run order:
-#   docker compose run provisioner   # one-time DEK setup
-#   docker compose run producer      # produce 10 CSFLE-encrypted records
-#   docker compose run consumer      # decrypt from GCP mirror topic
+#   docker compose run provisioner        # one-time DEK setup (dual mode: both KMS reachable)
+#   docker compose run provision-dst      # split-mode phase 2 (run on destination side after schema linking replicates transfer subject)
+#   docker compose run producer           # produce 10 CSFLE-encrypted records
+#   docker compose run consumer           # decrypt from GCP mirror topic
+#   docker compose run dek-sync           # pre-failback DEK sync (re-wrap GCP-era DEKs with AWS KMS)
 #
-# KMS boundary verification:
+# KMS boundary verification (see docs/test-cases.md for full spec and run results):
 #   docker compose run source-consumer                  # AWS cluster + AWS KMS → succeeds
 #   docker compose run source-consumer-gcp-attempt      # AWS cluster + GCP KMS → fails (expected)
 #   docker compose run destination-consumer-aws-attempt # GCP cluster + AWS KMS → fails (expected)
@@ -72,4 +74,18 @@ services:
     command: ["destination-consumer-aws-attempt", "/config/deployment.properties"]
     environment:
       <<: *aws-env
+    volumes: *shared-vols
+
+  provision-dst:
+    build: .
+    command: ["provision-dst", "/config/deployment.properties"]
+    environment:
+      <<: *gcp-env
+    volumes: *shared-vols
+
+  dek-sync:
+    build: .
+    command: ["sync", "/config/deployment.properties"]
+    environment:
+      <<: [*aws-env, *gcp-env]
     volumes: *shared-vols

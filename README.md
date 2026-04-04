@@ -138,19 +138,29 @@ export GOOGLE_APPLICATION_CREDENTIALS=~/.config/gcloud/application_default_crede
 JAR=target/cross-cloud-csfle-0.1.0-SNAPSHOT.jar
 PROPS=deployment/deployment.properties
 
-# 1. Provision DEKs (one-time — idempotent on reruns)
+# 1. Provision DEKs — dual mode (default: both KMS systems reachable)
 java -jar $JAR provision $PROPS
+
+# 1b. Split mode — when source cannot reach destination KMS
+#     Phase 1 (source side):
+java -jar $JAR provision $PROPS          # set dek.provisioning.mode=split in properties
+#     Wait for schema linking to replicate transfer subject to dst SR, then:
+#     Phase 2 (destination side):
+java -jar $JAR provision-dst $PROPS
 
 # 2. Produce 10 CSFLE-encrypted records to the source cluster
 java -jar $JAR producer $PROPS
 
 # 3. Consume and decrypt from the GCP mirror topic (destination, GCP KMS)
 java -jar $JAR consumer $PROPS
+
+# 4. (Failback only) Sync DEKs after link re-establishment
+java -jar $JAR sync $PROPS
 ```
 
 ### KMS boundary verification
 
-Four modes explicitly prove the KMS access boundary:
+Four modes explicitly prove the KMS access boundary. See [`docs/test-cases.md`](docs/test-cases.md) for full test case specifications and live run results.
 
 ```bash
 # Positive: AWS cluster + AWS KMS → decrypts successfully
@@ -174,9 +184,11 @@ java -jar $JAR destination-consumer-aws-attempt $PROPS
 #   2. Set GOOGLE_APPLICATION_CREDENTIALS to your GCP service account JSON path.
 #   3. Set AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY (and optionally AWS_SESSION_TOKEN).
 
-docker compose run provisioner   # one-time DEK setup
-docker compose run producer      # produce 10 CSFLE-encrypted records
-docker compose run consumer      # decrypt from GCP mirror topic
+docker compose run provisioner        # one-time DEK setup (dual mode)
+docker compose run provision-dst      # split-mode phase 2 (destination side only)
+docker compose run producer           # produce 10 CSFLE-encrypted records
+docker compose run consumer           # decrypt from GCP mirror topic
+docker compose run dek-sync           # pre-failback DEK sync
 ```
 
 ---
@@ -190,7 +202,8 @@ cross-cloud-csfle/
 │   └── deployment.properties            # Your local config — gitignored
 ├── docs/
 │   ├── design.md                        # Full design decisions and trade-off record
-│   └── failover-design.md               # DR failover, failback, and DEK sync design
+│   ├── failover-design.md               # DR failover, failback, and DEK sync design
+│   └── test-cases.md                    # 4-quadrant KMS isolation verification suite + run results
 ├── Dockerfile                           # Multi-stage Maven + JRE build
 ├── docker-compose.yml                   # provisioner / producer / consumer / test services
 ├── src/
